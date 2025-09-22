@@ -334,72 +334,196 @@ def verify_webhook():
 
 @app.route('/webhook', methods=['POST'])
 def handle_webhook():
-    """Main webhook handler for Instagram messages"""
-    
+    """Main webhook handler for Instagram messages - ENHANCED DEBUG VERSION"""
+
+    # Log ALL incoming requests
+    logger.info("=== WEBHOOK REQUEST RECEIVED ===")
+    logger.info(f"Method: {request.method}")
+    logger.info(f"URL: {request.url}")
+    logger.info(f"Headers: {dict(request.headers)}")
+    logger.info(f"Remote Address: {request.remote_addr}")
+    logger.info(f"Content Length: {request.content_length}")
+
+    # Get raw data first
+    raw_data = request.get_data()
+    logger.info(f"Raw Data Length: {len(raw_data)}")
+    logger.info(f"Raw Data Preview: {raw_data[:500]}...")
+
     # Verify signature if enabled
     signature = request.headers.get('X-Hub-Signature-256', '')
-    if config.ENABLE_SIGNATURE_VERIFICATION:
-        if not verify_signature(request.data, signature):
-            logger.error("Invalid signature")
+    logger.info(f"Signature present: {bool(signature)}")
+    logger.info(f"Signature verification enabled: {config.ENABLE_SIGNATURE_VERIFICATION}")
+
+    if config.ENABLE_SIGNATURE_VERIFICATION and signature:
+        if not verify_signature(raw_data, signature):
+            logger.error("❌ SIGNATURE VERIFICATION FAILED")
+            logger.error(f"Expected signature calculation failed for: {signature}")
             return Response('Unauthorized', status=401)
-    
+        else:
+            logger.info("✅ Signature verification passed")
+
     try:
         data = request.get_json()
-        
-        # Log in debug mode
-        if config.DEBUG_MODE:
-            logger.info(f"Webhook data: {json.dumps(data, indent=2)}")
-        
-        # Process Instagram webhooks
-        if data.get('object') == 'instagram':
+
+        # ALWAYS log full webhook data for debugging
+        logger.info("=== FULL WEBHOOK DATA ===")
+        logger.info(json.dumps(data, indent=2))
+
+        # Check webhook object type
+        webhook_object = data.get('object', 'UNKNOWN')
+        logger.info(f"Webhook object type: {webhook_object}")
+
+        if webhook_object == 'page':
+            logger.info("📱 Received Facebook Page webhook")
             entries = data.get('entry', [])
-            
+
             for entry in entries:
+                logger.info(f"Processing entry: {entry.get('id', 'NO_ID')}")
+
+                # Check for messaging events
                 messaging_events = entry.get('messaging', [])
-                
-                for event in messaging_events:
-                    sender_id = event.get('sender', {}).get('id')
-                    
-                    # Skip if it's from our own account
-                    if sender_id == config.INSTAGRAM_BUSINESS_ACCOUNT_ID:
-                        continue
-                    
-                    # Process shared post
-                    logger.info(f"Processing message from {sender_id}")
-                    
-                    try:
-                        shared_post = process_shared_post(event)
-                        extracted_data = extract_all_data(shared_post)
-                        
-                        # Log extracted data
-                        logger.info(f"Extracted URLs: {extracted_data.urls}")
-                        logger.info(f"Instagram Post: {extracted_data.instagram_post_url}")
-                        logger.info(f"Hashtags: {extracted_data.hashtags}")
-                        
-                        # Send acknowledgment
-                        send_acknowledgment(sender_id, extracted_data)
-                        
-                        # Log for next phase
-                        if extracted_data.urls:
-                            logger.info("Ready for price comparison processing:")
-                            for url in extracted_data.urls:
-                                logger.info(f"  - {url}")
-                                
-                    except Exception as e:
-                        logger.error(f"Error processing message: {e}")
-                        if config.DEBUG_MODE:
+                if messaging_events:
+                    logger.info(f"Found {len(messaging_events)} messaging events")
+
+                    for event in messaging_events:
+                        sender_id = event.get('sender', {}).get('id', 'UNKNOWN')
+                        logger.info(f"Event from sender: {sender_id}")
+
+                        # Skip if it's from our own account
+                        if sender_id == config.INSTAGRAM_BUSINESS_ACCOUNT_ID:
+                            logger.info("⏭️ Skipping message from own account")
+                            continue
+
+                        # Process any message
+                        logger.info(f"🔄 Processing message from {sender_id}")
+                        logger.info(f"Full event data: {json.dumps(event, indent=2)}")
+
+                        try:
+                            shared_post = process_shared_post(event)
+                            extracted_data = extract_all_data(shared_post)
+
+                            # Log extracted data
+                            logger.info(f"✅ Extracted URLs: {extracted_data.urls}")
+                            logger.info(f"📸 Instagram Post: {extracted_data.instagram_post_url}")
+                            logger.info(f"🏷️ Hashtags: {extracted_data.hashtags}")
+                            logger.info(f"📝 Caption: {extracted_data.caption_text}")
+
+                            # Send acknowledgment
+                            send_acknowledgment(sender_id, extracted_data)
+
+                            # Log for next phase
+                            if extracted_data.urls:
+                                logger.info("🎯 Ready for price comparison processing:")
+                                for url in extracted_data.urls:
+                                    logger.info(f"  🔗 {url}")
+                            else:
+                                logger.warning("⚠️ No URLs extracted from message")
+
+                        except Exception as e:
+                            logger.error(f"❌ Error processing message: {e}")
                             import traceback
                             logger.error(traceback.format_exc())
-        
+
+                # Check for changes (Instagram-specific)
+                changes = entry.get('changes', [])
+                if changes:
+                    logger.info(f"Found {len(changes)} changes")
+                    for change in changes:
+                        logger.info(f"Change: {json.dumps(change, indent=2)}")
+
+        elif webhook_object == 'instagram':
+            logger.info("📷 Received Instagram webhook")
+            entries = data.get('entry', [])
+
+            for entry in entries:
+                logger.info(f"Processing Instagram entry: {entry.get('id', 'NO_ID')}")
+
+                # Check for messaging events
+                messaging_events = entry.get('messaging', [])
+                if messaging_events:
+                    logger.info(f"Found {len(messaging_events)} Instagram messaging events")
+
+                    for event in messaging_events:
+                        sender_id = event.get('sender', {}).get('id', 'UNKNOWN')
+                        logger.info(f"Instagram event from sender: {sender_id}")
+
+                        # Skip if it's from our own account
+                        if sender_id == config.INSTAGRAM_BUSINESS_ACCOUNT_ID:
+                            logger.info("⏭️ Skipping Instagram message from own account")
+                            continue
+
+                        # Process Instagram message
+                        logger.info(f"🔄 Processing Instagram message from {sender_id}")
+                        logger.info(f"Full Instagram event: {json.dumps(event, indent=2)}")
+
+                        try:
+                            shared_post = process_shared_post(event)
+                            extracted_data = extract_all_data(shared_post)
+
+                            # Log extracted data
+                            logger.info(f"✅ Extracted URLs: {extracted_data.urls}")
+                            logger.info(f"📸 Instagram Post: {extracted_data.instagram_post_url}")
+                            logger.info(f"🏷️ Hashtags: {extracted_data.hashtags}")
+
+                            # Send acknowledgment
+                            send_acknowledgment(sender_id, extracted_data)
+
+                            # Log for next phase
+                            if extracted_data.urls:
+                                logger.info("🎯 Ready for price comparison processing:")
+                                for url in extracted_data.urls:
+                                    logger.info(f"  🔗 {url}")
+
+                        except Exception as e:
+                            logger.error(f"❌ Error processing Instagram message: {e}")
+                            import traceback
+                            logger.error(traceback.format_exc())
+
+        else:
+            logger.warning(f"🤷 Unknown webhook object type: {webhook_object}")
+            logger.info("Full unknown webhook data:")
+            logger.info(json.dumps(data, indent=2))
+
+        logger.info("=== WEBHOOK PROCESSING COMPLETE ===")
         return Response('EVENT_RECEIVED', status=200)
-        
+
     except Exception as e:
-        logger.error(f"Error processing webhook: {e}")
-        if config.DEBUG_MODE:
-            import traceback
-            logger.error(traceback.format_exc())
-        
+        logger.error(f"💥 CRITICAL ERROR processing webhook: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+
+        # Still return 200 to avoid webhook deregistration
         return Response('EVENT_RECEIVED', status=200)
+
+@app.route('/test-webhook', methods=['POST'])
+def test_webhook():
+    """Test endpoint to verify webhook connectivity"""
+    logger.info("🧪 TEST WEBHOOK CALLED")
+    logger.info(f"Headers: {dict(request.headers)}")
+    logger.info(f"Data: {request.get_data()}")
+    logger.info(f"JSON: {request.get_json()}")
+
+    return jsonify({
+        'status': 'success',
+        'message': 'Test webhook received successfully',
+        'timestamp': datetime.utcnow().isoformat(),
+        'received_data': request.get_json() if request.is_json else str(request.get_data())
+    })
+
+@app.route('/webhook-info', methods=['GET'])
+def webhook_info():
+    """Display webhook configuration info"""
+    return jsonify({
+        'webhook_url': request.base_url.replace('/webhook-info', '/webhook'),
+        'test_webhook_url': request.base_url.replace('/webhook-info', '/test-webhook'),
+        'verify_token': config.VERIFY_TOKEN,
+        'app_secret_configured': bool(config.APP_SECRET),
+        'page_access_token_configured': bool(config.PAGE_ACCESS_TOKEN),
+        'instagram_business_id': config.INSTAGRAM_BUSINESS_ACCOUNT_ID,
+        'signature_verification_enabled': config.ENABLE_SIGNATURE_VERIFICATION,
+        'debug_mode': config.DEBUG_MODE,
+        'graph_api_version': config.GRAPH_API_VERSION
+    })
 
 @app.route('/health', methods=['GET'])
 def health_check():
