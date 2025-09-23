@@ -396,7 +396,8 @@ def handle_webhook():
 
                         # Process any message
                         logger.info(f"🔄 Processing message from {sender_id}")
-                        logger.info(f"Full event data: {json.dumps(event, indent=2)}")
+                        if config.DEBUG_MODE:
+                            logger.info(f"Full event data: {json.dumps(event, indent=2)}")
 
                         try:
                             shared_post = process_shared_post(event)
@@ -454,7 +455,8 @@ def handle_webhook():
 
                         # Process Instagram message
                         logger.info(f"🔄 Processing Instagram message from {sender_id}")
-                        logger.info(f"Full Instagram event: {json.dumps(event, indent=2)}")
+                        if config.DEBUG_MODE:
+                            logger.info(f"Full Instagram event: {json.dumps(event, indent=2)}")
 
                         try:
                             shared_post = process_shared_post(event)
@@ -873,6 +875,119 @@ def terms_of_service():
     </html>
     """
 
+@app.route('/callback', methods=['GET'])
+def oauth_callback():
+    """OAuth callback endpoint for Facebook/Instagram App Authorization"""
+    logger.info("=== OAUTH CALLBACK RECEIVED ===")
+
+    # Get all query parameters
+    code = request.args.get('code')
+    state = request.args.get('state')
+    error = request.args.get('error')
+    error_reason = request.args.get('error_reason')
+    error_description = request.args.get('error_description')
+
+    logger.info(f"Authorization code: {code}")
+    logger.info(f"State parameter: {state}")
+
+    if error:
+        logger.error(f"OAuth error: {error} - {error_reason} - {error_description}")
+        return jsonify({
+            'status': 'error',
+            'error': error,
+            'error_reason': error_reason,
+            'error_description': error_description,
+            'message': 'Authorization failed. Please try again.'
+        }), 400
+
+    if not code:
+        logger.error("No authorization code received")
+        return jsonify({
+            'status': 'error',
+            'message': 'No authorization code received'
+        }), 400
+
+    try:
+        # Exchange authorization code for access token
+        token_url = f"{config.GRAPH_API_URL}/oauth/access_token"
+        token_params = {
+            'client_id': os.environ.get('FACEBOOK_APP_ID', ''),
+            'client_secret': config.APP_SECRET,
+            'redirect_uri': request.base_url,
+            'code': code
+        }
+
+        logger.info(f"Exchanging code for token with params: {token_params}")
+
+        response = requests.get(token_url, params=token_params)
+        logger.info(f"Token exchange response: {response.text}")
+
+        if response.status_code == 200:
+            token_data = response.json()
+            access_token = token_data.get('access_token')
+
+            if access_token:
+                logger.info("✅ OAuth authorization successful")
+                return jsonify({
+                    'status': 'success',
+                    'message': 'Authorization successful! You can now close this window.',
+                    'access_token': access_token[:20] + '...',  # Show partial token for security
+                    'token_type': token_data.get('token_type', 'bearer')
+                })
+            else:
+                logger.error("No access token in response")
+                return jsonify({
+                    'status': 'error',
+                    'message': 'Failed to obtain access token'
+                }), 400
+        else:
+            logger.error(f"Token exchange failed: {response.text}")
+            return jsonify({
+                'status': 'error',
+                'message': 'Failed to exchange authorization code for token',
+                'details': response.text
+            }), 400
+
+    except Exception as e:
+        logger.error(f"OAuth callback error: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return jsonify({
+            'status': 'error',
+            'message': 'Internal server error during authorization',
+            'error': str(e)
+        }), 500
+
+@app.route('/auth/instagram', methods=['GET'])
+def instagram_auth():
+    """Generate Instagram OAuth authorization URL"""
+    app_id = os.environ.get('FACEBOOK_APP_ID', '')
+    if not app_id:
+        return jsonify({
+            'status': 'error',
+            'message': 'Facebook App ID not configured'
+        }), 500
+
+    redirect_uri = request.base_url.replace('/auth/instagram', '/callback')
+    state = os.urandom(16).hex()  # Generate random state for security
+
+    auth_url = (
+        f"https://www.facebook.com/v{config.GRAPH_API_VERSION.replace('v', '')}/dialog/oauth?"
+        f"client_id={app_id}&"
+        f"redirect_uri={redirect_uri}&"
+        f"state={state}&"
+        f"scope=instagram_basic,instagram_content_publish,pages_messaging,pages_read_engagement"
+    )
+
+    logger.info(f"Generated auth URL: {auth_url}")
+
+    return jsonify({
+        'status': 'success',
+        'auth_url': auth_url,
+        'redirect_uri': redirect_uri,
+        'state': state
+    })
+
 @app.route('/support', methods=['GET'])
 def support_page():
     """Support/Help page (bonus - good to have)"""
@@ -943,7 +1058,7 @@ def support_page():
     <body>
         <div class="container">
             <h1>Support & Help</h1>
-            
+
             <h2>How to Use Globle Price Comparison Bot</h2>
             <div class="steps">
                 <ol>
@@ -954,44 +1069,44 @@ def support_page():
                     <li><strong>Shop Smart:</strong> Click on the best price to visit the store directly</li>
                 </ol>
             </div>
-            
+
             <h2>Frequently Asked Questions</h2>
-            
+
             <div class="faq">
                 <h3>Q: What types of posts can I share?</h3>
                 <p>A: You can share any Instagram post that contains products - regular posts, shopping posts, ads, reels, or stories with product tags.</p>
             </div>
-            
+
             <div class="faq">
                 <h3>Q: Which stores do you compare?</h3>
                 <p>A: We currently compare prices from Amazon, Flipkart, Myntra, Nykaa, Ajio, and many more. We're constantly adding new stores!</p>
             </div>
-            
+
             <div class="faq">
                 <h3>Q: Is the service free?</h3>
                 <p>A: Yes! Our price comparison service is completely free to use.</p>
             </div>
-            
+
             <div class="faq">
                 <h3>Q: How accurate are the prices?</h3>
                 <p>A: We fetch real-time prices when you send a request. However, prices can change quickly, so always verify on the merchant's site before purchasing.</p>
             </div>
-            
+
             <div class="faq">
                 <h3>Q: Why didn't I get a response?</h3>
                 <p>A: Make sure you're sharing to the correct account (@globle.club) and that the post contains a product. If issues persist, contact our support.</p>
             </div>
-            
+
             <div class="faq">
                 <h3>Q: Do you store my data?</h3>
                 <p>A: We only process data temporarily to provide the service. We don't store personal messages or shopping history. See our Privacy Policy for details.</p>
             </div>
-            
+
             <div class="faq">
                 <h3>Q: Can I use this for business?</h3>
                 <p>A: Our service is intended for personal use. For business inquiries, please contact us directly.</p>
             </div>
-            
+
             <h2>Troubleshooting</h2>
             <ul>
                 <li><strong>Bot not responding:</strong> Ensure you're messaging @globle.club (business account)</li>
@@ -999,7 +1114,7 @@ def support_page():
                 <li><strong>Wrong product:</strong> Try sharing a post with clearer product information</li>
                 <li><strong>Error messages:</strong> Try again in a few minutes or contact support</li>
             </ul>
-            
+
             <h2>Contact Support</h2>
             <div class="contact">
                 <p><strong>Need more help? Reach out to us:</strong></p>
@@ -1008,7 +1123,7 @@ def support_page():
                 💬 Send us a DM on Instagram for quick help<br>
                 ⏰ Response Time: Usually within 24 hours</p>
             </div>
-            
+
             <h2>Feature Requests</h2>
             <p>Have ideas for improving our service? We'd love to hear from you! Send your suggestions to support@globle.club or DM us on Instagram.</p>
         </div>
