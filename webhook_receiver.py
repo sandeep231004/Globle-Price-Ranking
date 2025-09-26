@@ -159,10 +159,67 @@ def extract_shop_urls(text: str, attachments: List[Dict]) -> List[str]:
                 shop_urls.extend(title_urls)
                 logger.info(f"Found reel title with potential URLs: {title[:100]}...")
 
-            # Check for reel video ID
+            # Check for reel video ID and try to get more details
             reel_id = payload.get('reel_video_id')
             if reel_id:
                 logger.info(f"Found Instagram Reel ID: {reel_id}")
+                # Try to get detailed media info including product tags and links
+                media_details = get_instagram_media_details(reel_id)
+                if media_details:
+                    # Look for shopping product tags or links
+                    if 'shopping_product_tags' in media_details:
+                        for tag in media_details['shopping_product_tags']:
+                            if 'product_url' in tag:
+                                shop_urls.append(tag['product_url'])
+                                logger.info(f"Found shop URL from product tag: {tag['product_url']}")
+
+                    # Look for product tags (alternative field)
+                    if 'product_tags' in media_details:
+                        for tag in media_details['product_tags']:
+                            if isinstance(tag, dict) and 'product_url' in tag:
+                                shop_urls.append(tag['product_url'])
+                                logger.info(f"Found shop URL from product tag: {tag['product_url']}")
+
+                    # Check for URLs in the caption
+                    if 'caption_urls' in media_details:
+                        caption_urls = media_details['caption_urls']
+                        # Filter out social media and internal URLs
+                        for url in caption_urls:
+                            if not any(domain in url.lower() for domain in [
+                                'instagram.com', 'facebook.com', 'fb.me', 'lookaside.fbsbx.com',
+                                'ig_messaging_cdn', 'scontent', 'twitter.com', 'youtube.com'
+                            ]):
+                                shop_urls.append(url)
+                                logger.info(f"Found shop URL from caption: {url}")
+
+                    # Check for child media (carousel posts)
+                    if 'children' in media_details and 'data' in media_details['children']:
+                        for child in media_details['children']['data']:
+                            if 'product_tags' in child:
+                                for tag in child['product_tags']:
+                                    if isinstance(tag, dict) and 'product_url' in tag:
+                                        shop_urls.append(tag['product_url'])
+                                        logger.info(f"Found shop URL from child media: {tag['product_url']}")
+
+                    # Log comprehensive API response for debugging
+                    logger.info(f"Media details API response keys: {list(media_details.keys())}")
+                    if config.DEBUG_MODE:
+                        logger.info(f"Full media details: {json.dumps(media_details, indent=2)}")
+                else:
+                    logger.warning(f"Could not fetch additional details for reel {reel_id}")
+
+            # If this is a reel but no shop URLs found, provide helpful guidance
+            if attachment_type == 'ig_reel' and not shop_urls:
+                logger.warning("⚠️ No shop URLs found in reel - this is a known limitation")
+                logger.info("💡 EXPLANATION: Instagram 'Shop Now' buttons are only visible in the mobile app")
+                logger.info("📱 They don't appear in webhook data or API responses")
+                logger.info("🔗 WORKAROUND: Ask users to:")
+                logger.info("   1. Tap 'Shop Now' button in the Instagram app")
+                logger.info("   2. Copy the product URL from the opened page")
+                logger.info("   3. Send that URL directly to the bot")
+
+                # Set a flag to send a helpful message to the user
+                shop_urls.append("SHOP_NOW_LIMITATION_DETECTED")
 
         elif attachment_type == 'share':
             # Regular shared post
@@ -182,8 +239,11 @@ def extract_shop_urls(text: str, attachments: List[Dict]) -> List[str]:
             shop_urls.append(payload['product_url'])
         elif 'url' in payload:
             url = payload['url']
-            # Include all URLs - we'll filter later if needed
-            shop_urls.append(url)
+            # Filter out Facebook/Instagram internal URLs (video CDN, etc.)
+            if not any(domain in url for domain in ['lookaside.fbsbx.com', 'ig_messaging_cdn', 'scontent']):
+                shop_urls.append(url)
+            else:
+                logger.info(f"Skipping internal media URL: {url[:100]}...")
 
         # Also check for description field which may contain URLs
         if 'description' in payload:
@@ -200,6 +260,84 @@ def extract_shop_urls(text: str, attachments: List[Dict]) -> List[str]:
             expanded_urls.append(url)
 
     return list(set(expanded_urls))
+
+def get_instagram_media_details(media_id: str) -> Dict:
+    """Fetch additional media details using Instagram Graph API"""
+    if not config.INSTAGRAM_ACCESS_TOKEN and not config.PAGE_ACCESS_TOKEN:
+        logger.warning("No access token available for fetching media details")
+        return {}
+
+    access_token = config.INSTAGRAM_ACCESS_TOKEN or config.PAGE_ACCESS_TOKEN
+
+    try:
+        url = f"{config.GRAPH_API_URL}/{media_id}"
+        # Request comprehensive fields including shopping and product information
+        params = {
+            'fields': 'id,caption,media_type,media_url,permalink,thumbnail_url,timestamp,username,product_tags,shopping_product_tags,owner,children{media_url,media_type,product_tags},insights.metric(reach,impressions),comments_count,like_count',
+            'access_token': access_token
+        }
+
+        logger.info(f"Fetching comprehensive media details for {media_id}")
+        response = requests.get(url, params=params, timeout=15)
+
+        logger.info(f"API Response Status: {response.status_code}")
+        logger.info(f"API Response: {response.text}")
+
+        if response.status_code == 200:
+            data = response.json()
+            logger.info(f"Successfully fetched media details for {media_id}")
+
+            # Try to extract shop URLs from caption if available
+            caption = data.get('caption', '')
+            if caption:
+                logger.info(f"Media caption: {caption}")
+                caption_urls = extract_urls_from_text(caption)
+                if caption_urls:
+                    logger.info(f"Found URLs in caption: {caption_urls}")
+                    data['caption_urls'] = caption_urls
+
+            return data
+        else:
+            logger.error(f"Failed to fetch media details: {response.status_code} - {response.text}")
+
+            # If direct media access fails, try alternative approaches
+            if response.status_code == 400:
+                logger.info("Trying alternative media access methods...")
+                return try_alternative_media_access(media_id, access_token)
+
+    except Exception as e:
+        logger.error(f"Error fetching media details: {e}")
+
+    return {}
+
+def try_alternative_media_access(media_id: str, access_token: str) -> Dict:
+    """Try alternative methods to access media information"""
+    try:
+        # Try using Instagram Business Discovery API
+        if config.INSTAGRAM_BUSINESS_ACCOUNT_ID:
+            url = f"{config.GRAPH_API_URL}/{config.INSTAGRAM_BUSINESS_ACCOUNT_ID}"
+            params = {
+                'fields': f'business_discovery.username({media_id}){{media{{caption,permalink,media_url,product_tags}}}}',
+                'access_token': access_token
+            }
+
+            logger.info("Trying Instagram Business Discovery API...")
+            response = requests.get(url, params=params, timeout=10)
+
+            if response.status_code == 200:
+                data = response.json()
+                logger.info(f"Business Discovery API response: {response.text}")
+                return data
+            else:
+                logger.warning(f"Business Discovery API failed: {response.status_code}")
+
+        # Try using the media ID as a hashtag search (if it contains recognizable product info)
+        logger.info("Media access methods exhausted - trying hashtag analysis...")
+        return {}
+
+    except Exception as e:
+        logger.error(f"Alternative media access error: {e}")
+        return {}
 
 # Global variable to track processed messages and prevent duplicates
 processed_messages = set()
@@ -256,17 +394,31 @@ def send_acknowledgment(recipient_id: str, product_data: ProductData):
         logger.warning("Cannot send message - no page access token")
         return
 
+    # Filter out special flags from URLs for user response
+    actual_shop_urls = [url for url in product_data.shop_urls if url != "SHOP_NOW_LIMITATION_DETECTED"]
+    has_limitation_flag = "SHOP_NOW_LIMITATION_DETECTED" in product_data.shop_urls
+
     # Prepare message based on what was found
-    if product_data.shop_urls:
+    if actual_shop_urls:
         message_text = (
-            f"✅ Found {len(product_data.shop_urls)} shop URL(s)!\\n"
+            f"✅ Found {len(actual_shop_urls)} shop URL(s)!\\n"
             f"🔍 Searching for best prices...\\n"
             f"⏱️ This will take 15-30 seconds."
+        )
+    elif has_limitation_flag:
+        message_text = (
+            "📱 I see you shared an Instagram Reel/Ad!\\n\\n"
+            "⚠️ Unfortunately, Instagram 'Shop Now' buttons aren't accessible through our system.\\n\\n"
+            "🔗 Here's how to get price comparisons:\\n"
+            "1️⃣ Tap the 'Shop Now' button in Instagram\\n"
+            "2️⃣ Copy the product URL from the page that opens\\n"
+            "3️⃣ Send me that URL directly\\n\\n"
+            "💡 Or share posts that have direct product links in the caption!"
         )
     elif product_data.post_type == 'unsupported_share':
         message_text = "📱 I see you shared a post! Looking for shop URLs..."
     else:
-        message_text = "No URLs in the Ad. Please share a post that contains a product link."
+        message_text = "No URLs in the Ad. Please share a post that contains a product link or a direct product URL."
 
     url = f"{config.GRAPH_API_URL}/{config.PAGE_ID}/messages"
     payload = {
@@ -382,6 +534,10 @@ def handle_webhook():
                             # Extract shop URLs only
                             product_data = process_instagram_message(event)
 
+                            # Filter actual URLs for logging (exclude special flags)
+                            actual_shop_urls = [url for url in product_data.shop_urls if url != "SHOP_NOW_LIMITATION_DETECTED"]
+                            has_limitation_flag = "SHOP_NOW_LIMITATION_DETECTED" in product_data.shop_urls
+
                             # Log extracted data
                             logger.info("=" * 50)
                             logger.info("🛍️ SHOP URL EXTRACTION RESULTS:")
@@ -389,8 +545,14 @@ def handle_webhook():
                             logger.info(f"📅 Timestamp: {product_data.timestamp}")
                             logger.info(f"👤 Sender ID: {product_data.sender_id}")
                             logger.info(f"📝 Post Type: {product_data.post_type}")
-                            logger.info(f"🛒 Shop URLs Found: {len(product_data.shop_urls)}")
-                            for i, url in enumerate(product_data.shop_urls, 1):
+
+                            if has_limitation_flag:
+                                logger.info(f"⚠️  Shop Now Button Limitation Detected (Instagram Reel/Ad)")
+                                logger.info(f"🛒 Actual Shop URLs Found: {len(actual_shop_urls)}")
+                            else:
+                                logger.info(f"🛒 Shop URLs Found: {len(actual_shop_urls)}")
+
+                            for i, url in enumerate(actual_shop_urls, 1):
                                 logger.info(f"   {i}. {url}")
                             logger.info("=" * 50)
 
@@ -398,8 +560,10 @@ def handle_webhook():
                             send_acknowledgment(sender_id, product_data)
 
                             # Log completion
-                            if product_data.shop_urls:
-                                logger.info(f"🚀 Ready for price comparison: {len(product_data.shop_urls)} URLs to process")
+                            if actual_shop_urls:
+                                logger.info(f"🚀 Ready for price comparison: {len(actual_shop_urls)} URLs to process")
+                            elif has_limitation_flag:
+                                logger.info("📱 User guidance sent for Shop Now button limitation")
                             else:
                                 logger.info("ℹ️ No shop URLs found in this message")
 
