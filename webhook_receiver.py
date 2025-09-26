@@ -139,17 +139,41 @@ def extract_shop_urls(text: str, attachments: List[Dict]) -> List[str]:
     """Extract only shop/buy URLs from text and attachments"""
     shop_urls = []
 
-    # Extract URLs from text that might be shop links
+    # Extract URLs from text
     if text:
         urls = extract_urls_from_text(text)
-        for url in urls:
-            # Check if URL contains shop/buy keywords
-            if any(keyword in url.lower() for keyword in ['shop', 'buy', 'order', 'store', 'product', 'item']):
-                shop_urls.append(url)
+        # Include all URLs found in text - let user decide what's relevant
+        shop_urls.extend(urls)
 
     # Extract shop URLs from attachments
     for attachment in attachments:
         payload = attachment.get('payload', {})
+        attachment_type = attachment.get('type', '')
+
+        # Handle different attachment types
+        if attachment_type == 'ig_reel':
+            # Instagram Reel shared - extract URLs from title/description
+            title = payload.get('title', '')
+            if title:
+                title_urls = extract_urls_from_text(title)
+                shop_urls.extend(title_urls)
+                logger.info(f"Found reel title with potential URLs: {title[:100]}...")
+
+            # Check for reel video ID
+            reel_id = payload.get('reel_video_id')
+            if reel_id:
+                logger.info(f"Found Instagram Reel ID: {reel_id}")
+
+        elif attachment_type == 'share':
+            # Regular shared post
+            if 'url' in payload:
+                shop_urls.append(payload['url'])
+            if 'title' in payload:
+                title_urls = extract_urls_from_text(payload['title'])
+                shop_urls.extend(title_urls)
+            if 'description' in payload:
+                desc_urls = extract_urls_from_text(payload['description'])
+                shop_urls.extend(desc_urls)
 
         # Check for direct shop URLs in payload
         if 'shop_url' in payload:
@@ -158,9 +182,13 @@ def extract_shop_urls(text: str, attachments: List[Dict]) -> List[str]:
             shop_urls.append(payload['product_url'])
         elif 'url' in payload:
             url = payload['url']
-            # Only include if it looks like a shop URL
-            if any(keyword in url.lower() for keyword in ['shop', 'buy', 'order', 'store', 'product', 'item', 'cart']):
-                shop_urls.append(url)
+            # Include all URLs - we'll filter later if needed
+            shop_urls.append(url)
+
+        # Also check for description field which may contain URLs
+        if 'description' in payload:
+            desc_urls = extract_urls_from_text(payload['description'])
+            shop_urls.extend(desc_urls)
 
     # Expand shortened URLs and remove duplicates
     expanded_urls = []
@@ -172,6 +200,9 @@ def extract_shop_urls(text: str, attachments: List[Dict]) -> List[str]:
             expanded_urls.append(url)
 
     return list(set(expanded_urls))
+
+# Global variable to track processed messages and prevent duplicates
+processed_messages = set()
 
 def process_instagram_message(event: Dict) -> ProductData:
     """Process Instagram message and extract shop URLs only"""
@@ -204,10 +235,14 @@ def process_instagram_message(event: Dict) -> ProductData:
     if product_data.post_type == 'unknown':
         if attachments:
             for attachment in attachments:
-                if attachment.get('type') == 'share':
+                attachment_type = attachment.get('type')
+                if attachment_type == 'share':
                     product_data.post_type = 'share'
                     break
-                elif attachment.get('type') == 'link':
+                elif attachment_type == 'ig_reel':
+                    product_data.post_type = 'ig_reel'
+                    break
+                elif attachment_type == 'link':
                     product_data.post_type = 'direct_link'
                     break
         else:
@@ -321,6 +356,27 @@ def handle_webhook():
 
                         # Check if this is a message with content
                         if 'message' in event:
+                            message = event.get('message', {})
+                            message_id = message.get('mid', '')
+
+                            # Skip echo messages (our own bot responses)
+                            if message.get('is_echo'):
+                                logger.info("⏭️ Skipping echo message (bot's own response)")
+                                continue
+
+                            # Skip duplicate messages
+                            if message_id in processed_messages:
+                                logger.info(f"⏭️ Skipping duplicate message: {message_id}")
+                                continue
+
+                            # Add to processed messages
+                            processed_messages.add(message_id)
+
+                            # Skip read receipts
+                            if 'read' in event:
+                                logger.info("⏭️ Skipping read receipt")
+                                continue
+
                             logger.info(f"📨 Processing message from user: {sender_id}")
 
                             # Extract shop URLs only
