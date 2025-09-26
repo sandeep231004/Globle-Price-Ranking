@@ -10,6 +10,8 @@ from flask import Flask, request, Response, jsonify
 import re
 from dataclasses import dataclass, asdict
 from urllib.parse import urlparse, parse_qs
+import uuid
+import base64
 
 # Configure detailed logging
 logging.basicConfig(
@@ -24,22 +26,25 @@ app = Flask(__name__)
 class Config:
     """Configuration from environment variables"""
     # Facebook App Credentials
-    APP_SECRET = os.environ.get('FACEBOOK_APP_SECRET', '521776449f6f091a0e40b2c1288f9e2b')
-    VERIFY_TOKEN = os.environ.get('VERIFY_TOKEN', 'Globleisbig21')
-    PAGE_ACCESS_TOKEN = os.environ.get('PAGE_ACCESS_TOKEN', 'EAAQv1ZBigZAeEBPtCkvTZASz5gz0eAyYtXzZBIW5xNqtIgrBCVHaBZAnxDuoK9rx1orFZB00Lwxv6w6ZA4p6nJltNP8rHYHZAQ1QqhljVZBmGe2ZBIQcWrpncETBob3mKe3ZBWu5xFkU34vb9dHqeI4WMqT4oFyHsgnS0Q8Up24HlWszFnGp1nuSw0W8omCfScvEtobK48EvAZDZD')
-    
+    APP_SECRET = os.environ.get('FACEBOOK_APP_SECRET')
+    VERIFY_TOKEN = os.environ.get('VERIFY_TOKEN')
+    PAGE_ACCESS_TOKEN = os.environ.get('PAGE_ACCESS_TOKEN')
+
     # Instagram Business Account
-    INSTAGRAM_BUSINESS_ACCOUNT_ID = os.environ.get('INSTAGRAM_BUSINESS_ACCOUNT_ID', '17841471541916667')
-    
+    INSTAGRAM_BUSINESS_ACCOUNT_ID = os.environ.get('INSTAGRAM_BUSINESS_ACCOUNT_ID')
+
     # Page ID
-    PAGE_ID = os.environ.get('PAGE_ID', '792361613963486')
-    
+    PAGE_ID = os.environ.get('PAGE_ID')
+
     # API Configuration
     GRAPH_API_VERSION = os.environ.get('GRAPH_API_VERSION', 'v23.0')
     GRAPH_API_URL = f"https://graph.facebook.com/{GRAPH_API_VERSION}"
-    
+
     # Instagram Access Token (if different from page token)
-    INSTAGRAM_ACCESS_TOKEN = os.environ.get('INSTAGRAM_ACCESS_TOKEN', 'IGAAL1eaempWNBZAFFKb0c4Yl96QVIyUDJUbW9kSWQxazZAMdFRlanluYlVJTkdNQndIM0lubzJNekR3aTFncmtZASC1zNnl5c3k5QndoSERQTl9aRzVtNHpoWk1iVV9QeVdwMFhaSUpJYWI3QnFvSnRzUlQ3TzJla3BWWTdFNEdjOAZDZD')
+    INSTAGRAM_ACCESS_TOKEN = os.environ.get('INSTAGRAM_ACCESS_TOKEN')
+
+    # Image Storage
+    IMAGES_DIR = os.environ.get('IMAGES_DIR', '/tmp/claude/instagram_images')
     
     # Webhook Security
     ENABLE_SIGNATURE_VERIFICATION = os.environ.get('ENABLE_SIGNATURE_VERIFICATION', 'true').lower() == 'true'
@@ -57,7 +62,7 @@ class ProductData:
     sender_id: str
     sender_username: Optional[str]
     message_id: str
-    post_type: str  # 'share', 'story_mention', 'direct_link'
+    post_type: str  # 'share', 'story_mention', 'direct_link', 'unsupported_share'
     instagram_post_url: Optional[str]
     instagram_post_id: Optional[str]
     caption: Optional[str]
@@ -68,6 +73,11 @@ class ProductData:
     media_url: Optional[str]
     media_type: Optional[str]
     product_tags: List[Dict]
+    downloaded_images: List[str]  # Local file paths of downloaded images
+    product_name: Optional[str]
+    extracted_price: Optional[str]
+    brand_name: Optional[str]
+    product_category: Optional[str]
     raw_webhook_data: Dict
 
 # ============== UTILITY FUNCTIONS ==============
@@ -152,12 +162,153 @@ def extract_instagram_post_id(url: str) -> Optional[str]:
         r'/reel/([A-Za-z0-9_-]+)',  # Reels
         r'/tv/([A-Za-z0-9_-]+)',  # IGTV
     ]
-    
+
     for pattern in patterns:
         match = re.search(pattern, url)
         if match:
             return match.group(1)
     return None
+
+def download_image(image_url: str, filename: str = None) -> Optional[str]:
+    """Download image from URL and save locally"""
+    try:
+        # Create images directory if it doesn't exist
+        os.makedirs(config.IMAGES_DIR, exist_ok=True)
+
+        # Generate filename if not provided
+        if not filename:
+            filename = f"img_{uuid.uuid4().hex[:8]}.jpg"
+
+        file_path = os.path.join(config.IMAGES_DIR, filename)
+
+        # Download image
+        response = requests.get(image_url, stream=True, timeout=10)
+        response.raise_for_status()
+
+        with open(file_path, 'wb') as f:
+            for chunk in response.iter_content(chunk_size=8192):
+                f.write(chunk)
+
+        logger.info(f"✅ Downloaded image: {file_path}")
+        return file_path
+
+    except Exception as e:
+        logger.error(f"❌ Failed to download image {image_url}: {e}")
+        return None
+
+def handle_unsupported_message(event: Dict) -> Optional[str]:
+    """Handle unsupported messages which often contain shared posts"""
+    message = event.get('message', {})
+    message_id = message.get('mid', '')
+
+    # Try to decode the message ID to extract potential post information
+    try:
+        # Instagram message IDs sometimes contain encoded post information
+        # This is a heuristic approach - the actual decoding might vary
+        if 'aWdf' in message_id:  # Common prefix in Instagram message IDs
+            logger.info(f"🔍 Attempting to extract post info from message ID: {message_id}")
+
+            # For now, we'll need to use the Instagram Graph API to get conversation data
+            # This requires additional API calls to retrieve the conversation
+            return get_conversation_details(event.get('sender', {}).get('id'), message_id)
+
+    except Exception as e:
+        logger.error(f"Failed to handle unsupported message: {e}")
+
+    return None
+
+def get_conversation_details(sender_id: str, message_id: str) -> Optional[str]:
+    """Fetch conversation details to get shared content"""
+    if not config.PAGE_ACCESS_TOKEN:
+        logger.warning("Cannot fetch conversation - no page access token")
+        return None
+
+    try:
+        # Try to get conversation using Instagram Graph API
+        url = f"{config.GRAPH_API_URL}/{config.PAGE_ID}/conversations"
+        params = {
+            'fields': 'participants,messages{message,attachments,from}',
+            'access_token': config.PAGE_ACCESS_TOKEN,
+            'limit': 10
+        }
+
+        response = requests.get(url, params=params, timeout=10)
+        if response.status_code == 200:
+            data = response.json()
+            logger.info(f"📥 Conversation data: {json.dumps(data, indent=2)}")
+
+            # Look for the specific message in conversations
+            for conversation in data.get('data', []):
+                messages = conversation.get('messages', {}).get('data', [])
+                for msg in messages:
+                    if msg.get('id') == message_id:
+                        logger.info(f"Found matching message: {msg}")
+                        return msg
+
+        else:
+            logger.error(f"Failed to fetch conversations: {response.status_code} - {response.text}")
+
+    except Exception as e:
+        logger.error(f"Error fetching conversation details: {e}")
+
+    return None
+
+def extract_product_info_from_text(text: str) -> Dict[str, Any]:
+    """Extract product information from text using patterns"""
+    if not text:
+        return {}
+
+    info = {}
+
+    # Extract prices (₹, $, €, £, etc.)
+    price_patterns = [
+        r'[₹$€£¥][\d,]+(?:\.\d{2})?',
+        r'[\d,]+(?:\.\d{2})?\s*[₹$€£¥]',
+        r'(?:price|cost|for|at)\s*:?\s*[₹$€£¥]?[\d,]+(?:\.\d{2})?',
+        r'(?:only|just)\s*[₹$€£¥]?[\d,]+(?:\.\d{2})?'
+    ]
+
+    for pattern in price_patterns:
+        matches = re.findall(pattern, text, re.IGNORECASE)
+        if matches:
+            info['extracted_price'] = matches[0]
+            break
+
+    # Extract brand names (common fashion/product brands)
+    brand_keywords = [
+        'nike', 'adidas', 'puma', 'zara', 'h&m', 'uniqlo', 'forever21', 'mango',
+        'apple', 'samsung', 'oneplus', 'realme', 'xiaomi', 'oppo', 'vivo',
+        'myntra', 'ajio', 'flipkart', 'amazon', 'nykaa', 'lifestyle'
+    ]
+
+    text_lower = text.lower()
+    for brand in brand_keywords:
+        if brand in text_lower:
+            info['brand_name'] = brand.title()
+            break
+
+    # Extract product categories
+    category_keywords = {
+        'clothing': ['shirt', 'dress', 'jeans', 'top', 'trouser', 'kurta', 'saree', 'lehenga'],
+        'footwear': ['shoes', 'sneakers', 'sandals', 'heels', 'boots', 'slippers'],
+        'electronics': ['phone', 'laptop', 'tablet', 'headphones', 'earbuds', 'watch'],
+        'beauty': ['lipstick', 'foundation', 'mascara', 'cream', 'serum', 'perfume'],
+        'accessories': ['bag', 'wallet', 'belt', 'sunglasses', 'jewelry', 'watch']
+    }
+
+    for category, keywords in category_keywords.items():
+        if any(keyword in text_lower for keyword in keywords):
+            info['product_category'] = category
+            break
+
+    # Extract product name (first few words that might be a title)
+    sentences = text.split('.')
+    if sentences:
+        first_sentence = sentences[0].strip()
+        if len(first_sentence) < 100:  # Reasonable title length
+            info['product_name'] = first_sentence
+
+    return info
 
 def extract_hashtags_mentions(text: str) -> tuple:
     """Extract hashtags and brand mentions from text"""
@@ -217,11 +368,29 @@ def process_instagram_message(event: Dict) -> ProductData:
         media_url=None,
         media_type=None,
         product_tags=[],
+        downloaded_images=[],
+        product_name=None,
+        extracted_price=None,
+        brand_name=None,
+        product_category=None,
         raw_webhook_data=event
     )
     
     message = event.get('message', {})
-    
+
+    # Check if this is an unsupported message (often shared posts)
+    if message.get('is_unsupported'):
+        logger.info("🔍 Processing unsupported message (likely shared post)")
+        product_data.post_type = 'unsupported_share'
+
+        # Try to get additional info about the shared content
+        conversation_data = handle_unsupported_message(event)
+        if conversation_data:
+            logger.info(f"📥 Retrieved conversation data: {conversation_data}")
+
+        # Since this is likely a shared Instagram post, let's try an alternative approach
+        logger.info("📄 Attempting alternative extraction for shared post...")
+
     # Extract text/caption
     if 'text' in message:
         product_data.caption = message['text']
@@ -229,6 +398,17 @@ def process_instagram_message(event: Dict) -> ProductData:
         # Extract URLs from caption
         caption_urls = extract_urls_from_text(message['text'])
         product_data.product_urls.extend(caption_urls)
+
+        # Extract additional product info from text
+        text_info = extract_product_info_from_text(message['text'])
+        if text_info.get('extracted_price'):
+            product_data.extracted_price = text_info['extracted_price']
+        if text_info.get('brand_name'):
+            product_data.brand_name = text_info['brand_name']
+        if text_info.get('product_category'):
+            product_data.product_category = text_info['product_category']
+        if text_info.get('product_name'):
+            product_data.product_name = text_info['product_name']
     
     # Process attachments
     attachments = message.get('attachments', [])
@@ -254,6 +434,12 @@ def process_instagram_message(event: Dict) -> ProductData:
                             product_data.hashtags, product_data.brand_mentions = extract_hashtags_mentions(media_details['caption'])
                         if 'media_url' in media_details:
                             product_data.media_url = media_details['media_url']
+                            # Download the media if it's an image
+                            if media_details.get('media_type') in ['IMAGE', 'CAROUSEL_ALBUM']:
+                                downloaded_path = download_image(media_details['media_url'],
+                                                                f"post_{post_id}_{uuid.uuid4().hex[:8]}.jpg")
+                                if downloaded_path:
+                                    product_data.downloaded_images.append(downloaded_path)
                         if 'media_type' in media_details:
                             product_data.media_type = media_details['media_type']
                         if 'product_tags' in media_details:
@@ -289,7 +475,12 @@ def process_instagram_message(event: Dict) -> ProductData:
         elif att_type == 'image':
             product_data.media_type = 'image'
             product_data.media_url = payload.get('url')
-            
+            # Download the image
+            if payload.get('url'):
+                downloaded_path = download_image(payload['url'], f"attachment_{uuid.uuid4().hex[:8]}.jpg")
+                if downloaded_path:
+                    product_data.downloaded_images.append(downloaded_path)
+
         elif att_type == 'video':
             product_data.media_type = 'video'
             product_data.media_url = payload.get('url')
@@ -335,14 +526,17 @@ def send_acknowledgment(recipient_id: str, product_data: ProductData):
             f"🔍 Searching for the best prices across multiple stores...\n"
             f"⏱️ This will take about 15-30 seconds."
         )
+    elif product_data.post_type == 'unsupported_share':
+        message_text = (
+            "📱 I can see you shared an Instagram post!\n"
+            "📷 I'm analyzing the post content and images...\n"
+            "🔍 Searching for similar products across stores...\n"
+            "⏱️ This might take 30-60 seconds for image analysis."
+        )
     else:
         message_text = (
             "🤔 I couldn't find any product links in this post.\n"
-            "Please share a post that contains:\n"
-            "• A 'Shop Now' button\n"
-            "• Product tags\n"
-            "• Links in the caption\n"
-            "I'll help you find the best price!"
+            "Please share a post that contains a product link or shopping tag."
         )
     
     url = f"{config.GRAPH_API_URL}/{config.PAGE_ID}/messages"
@@ -452,9 +646,16 @@ def handle_webhook():
                             logger.info(f"📦 Product URLs Found: {len(product_data.product_urls)}")
                             for i, url in enumerate(product_data.product_urls, 1):
                                 logger.info(f"   {i}. {url}")
+                            logger.info(f"🏪 Product Name: {product_data.product_name}")
+                            logger.info(f"💰 Extracted Price: {product_data.extracted_price}")
+                            logger.info(f"🏷️ Brand Name: {product_data.brand_name}")
+                            logger.info(f"📂 Category: {product_data.product_category}")
                             logger.info(f"#️⃣ Hashtags: {product_data.hashtags}")
                             logger.info(f"@️ Brand Mentions: {product_data.brand_mentions}")
                             logger.info(f"🖼️ Media Type: {product_data.media_type}")
+                            logger.info(f"📸 Downloaded Images: {len(product_data.downloaded_images)} files")
+                            for i, img_path in enumerate(product_data.downloaded_images, 1):
+                                logger.info(f"   {i}. {img_path}")
                             logger.info(f"🏷️ Product Tags: {len(product_data.product_tags)} found")
                             logger.info("=" * 60)
                             
