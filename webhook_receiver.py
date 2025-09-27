@@ -135,170 +135,410 @@ def expand_shortened_url(url: str, max_redirects: int = 5) -> str:
         logger.warning(f"Could not expand URL {url}: {e}")
         return url
 
-def extract_shop_urls(text: str, attachments: List[Dict], event_data: Dict = None) -> List[str]:
-    """Extract only shop/buy URLs from text, attachments, and event data"""
-    shop_urls = []
+class InstagramShoppingExtractor:
+    """Enhanced extractor for Instagram shopping URLs from shared content"""
 
-    # First, check if this is an Ad with ad_id (highest priority for Shop Now buttons)
-    if event_data:
-        # Look for ad_id in various possible locations
-        ad_id = None
+    def __init__(self, access_token: str, ig_business_id: str):
+        self.access_token = access_token
+        self.ig_business_id = ig_business_id
+        self.graph_api_url = "https://graph.facebook.com/v23.0"
 
-        # Check direct ad_id field
-        if 'ad_id' in event_data:
-            ad_id = event_data['ad_id']
+    def extract_media_id_from_permalink(self, permalink: str) -> Optional[str]:
+        """
+        Extract media ID from Instagram permalink
+        Example: https://www.instagram.com/p/C4xxxxx/ or /reel/C4xxxxx/
+        """
+        patterns = [
+            r'/p/([A-Za-z0-9_-]+)',
+            r'/reel/([A-Za-z0-9_-]+)',
+            r'/tv/([A-Za-z0-9_-]+)'
+        ]
 
-        # Check in message metadata
-        message = event_data.get('message', {})
-        if 'ad_id' in message:
-            ad_id = message['ad_id']
+        for pattern in patterns:
+            match = re.search(pattern, permalink)
+            if match:
+                shortcode = match.group(1)
+                logger.info(f"Extracted shortcode: {shortcode}")
+                return self.convert_shortcode_to_media_id(shortcode)
+        return None
 
-        # Check in attachments for ad references
-        for attachment in attachments:
-            payload = attachment.get('payload', {})
-            if 'ad_id' in payload:
-                ad_id = payload['ad_id']
-                break
+    def convert_shortcode_to_media_id(self, shortcode: str) -> Optional[str]:
+        """
+        Convert Instagram shortcode to media ID using oembed endpoint
+        """
+        try:
+            # Use Instagram's oembed endpoint to get media information
+            oembed_url = f"https://graph.facebook.com/v23.0/instagram_oembed"
+            params = {
+                'url': f"https://www.instagram.com/p/{shortcode}/",
+                'access_token': self.access_token,
+                'fields': 'author_id,media_id'
+            }
 
-        # If we found an ad_id, get the Shop Now URL from Ad Creative
-        if ad_id:
-            logger.info(f"🎯 Detected Ad with ID: {ad_id} - fetching Shop Now URL")
-            ad_creative_link = get_ad_creative_link(ad_id)
-            if ad_creative_link:
-                shop_urls.append(ad_creative_link)
-                logger.info(f"✅ Successfully extracted Ad Creative Shop Now URL: {ad_creative_link}")
-            else:
-                logger.warning(f"⚠️ No Shop Now URL found in Ad Creative for ad_id: {ad_id}")
+            response = requests.get(oembed_url, params=params)
+            if response.status_code == 200:
+                data = response.json()
+                media_id = data.get('media_id')
+                if media_id:
+                    logger.info(f"Converted shortcode to media_id: {media_id}")
+                    return media_id
+        except Exception as e:
+            logger.error(f"Error converting shortcode: {e}")
+        return None
 
-    # Extract URLs from text (lower priority)
-    if text:
-        urls = extract_urls_from_text(text)
-        # Include all URLs found in text - let user decide what's relevant
-        shop_urls.extend(urls)
+    def get_media_with_product_tags(self, media_id: str) -> Dict:
+        """
+        Fetch media details including product tags and shopping information
+        """
+        logger.info(f"🎯 API CALL: Getting media details for {media_id}")
+        logger.info(f"   🔑 Using access token: {self.access_token[:20]}...{self.access_token[-10:] if len(self.access_token) > 30 else ''}")
+        logger.info(f"   🆔 Instagram Business ID: {self.ig_business_id}")
 
-    # Extract shop URLs from attachments
-    for attachment in attachments:
-        payload = attachment.get('payload', {})
-        attachment_type = attachment.get('type', '')
+        try:
+            # Try different ID formats
+            media_ids_to_try = [
+                media_id,
+                f"{self.ig_business_id}_{media_id}",
+                f"{media_id}_{self.ig_business_id}"
+            ]
 
-        # Handle different attachment types
-        if attachment_type == 'ig_reel':
-            # Instagram Reel shared - extract URLs from title/description
-            title = payload.get('title', '')
-            if title:
-                title_urls = extract_urls_from_text(title)
-                shop_urls.extend(title_urls)
-                logger.info(f"Found reel title with potential URLs: {title[:100]}...")
+            logger.info(f"   📋 Will try {len(media_ids_to_try)} ID formats: {media_ids_to_try}")
 
-            # Check for reel video ID and try to get more details
-            reel_id = payload.get('reel_video_id')
-            if reel_id:
-                logger.info(f"Found Instagram Reel ID: {reel_id}")
-                # Try to get detailed media info including product tags and links
-                media_details = get_instagram_media_details(reel_id)
-                if media_details:
-                    # Look for shopping product tags or links
-                    if 'shopping_product_tags' in media_details:
-                        for tag in media_details['shopping_product_tags']:
-                            if 'product_url' in tag:
-                                shop_urls.append(tag['product_url'])
-                                logger.info(f"Found shop URL from product tag: {tag['product_url']}")
+            for i, test_id in enumerate(media_ids_to_try, 1):
+                url = f"{self.graph_api_url}/{test_id}"
 
-                    # Look for product tags (website_url field)
-                    if 'product_tags' in media_details:
-                        for tag in media_details['product_tags']:
-                            if isinstance(tag, dict) and 'product' in tag:
-                                product = tag['product']
-                                if isinstance(product, dict) and 'website_url' in product:
-                                    website_url = product['website_url']
-                                    shop_urls.append(website_url)
-                                    product_name = product.get('name', 'Unknown Product')
-                                    logger.info(f"Found Shoppable Post product URL: {website_url} (Product: {product_name})")
-                            # Fallback to old format if exists
-                            elif isinstance(tag, dict) and 'product_url' in tag:
-                                shop_urls.append(tag['product_url'])
-                                logger.info(f"Found shop URL from product tag (fallback): {tag['product_url']}")
+                # Request comprehensive fields including shopping data
+                params = {
+                    'fields': ','.join([
+                        'id',
+                        'ig_id',
+                        'caption',
+                        'media_type',
+                        'media_url',
+                        'permalink',
+                        'username',
+                        'timestamp',
+                        # Shopping and product fields
+                        'product_tags',
+                        'shopping_outbound_link',
+                        'product_type',
+                        'product_appeal_status',
+                        # Try to get child media for carousels
+                        'children{id,media_url,product_tags}'
+                    ]),
+                    'access_token': self.access_token
+                }
 
-                    # Check for URLs in the caption
-                    if 'caption_urls' in media_details:
-                        caption_urls = media_details['caption_urls']
-                        # Filter out social media and internal URLs
-                        for url in caption_urls:
-                            if not any(domain in url.lower() for domain in [
-                                'instagram.com', 'facebook.com', 'fb.me', 'lookaside.fbsbx.com',
-                                'ig_messaging_cdn', 'scontent', 'twitter.com', 'youtube.com'
-                            ]):
-                                shop_urls.append(url)
-                                logger.info(f"Found shop URL from caption: {url}")
+                logger.info(f"   🌐 API Call {i}/{len(media_ids_to_try)}:")
+                logger.info(f"      📍 URL: {url}")
+                logger.info(f"      📋 Fields: {params['fields']}")
+                logger.info(f"      🔑 Token (partial): {self.access_token[:15]}...")
 
-                    # Check for child media (carousel posts)
-                    if 'children' in media_details and 'data' in media_details['children']:
-                        for child in media_details['children']['data']:
-                            if 'product_tags' in child:
-                                for tag in child['product_tags']:
-                                    if isinstance(tag, dict) and 'product' in tag:
-                                        product = tag['product']
-                                        if isinstance(product, dict) and 'website_url' in product:
-                                            website_url = product['website_url']
-                                            shop_urls.append(website_url)
-                                            product_name = product.get('name', 'Unknown Product')
-                                            logger.info(f"Found Shoppable Post product URL from child media: {website_url} (Product: {product_name})")
-                                    # Fallback to old format if exists
-                                    elif isinstance(tag, dict) and 'product_url' in tag:
-                                        shop_urls.append(tag['product_url'])
-                                        logger.info(f"Found shop URL from child media (fallback): {tag['product_url']}")
+                response = requests.get(url, params=params, timeout=15)
 
-                    # Log comprehensive API response for debugging
-                    logger.info(f"Media details API response keys: {list(media_details.keys())}")
-                    if config.DEBUG_MODE:
-                        logger.info(f"Full media details: {json.dumps(media_details, indent=2)}")
+                logger.info(f"   📊 Response {i}: Status {response.status_code}")
+                logger.info(f"   📊 Response headers: {dict(response.headers)}")
+                logger.info(f"   📊 Response length: {len(response.text)} chars")
+
+                if response.status_code == 200:
+                    data = response.json()
+                    logger.info(f"   ✅ SUCCESS: Media data retrieved with {len(data)} fields")
+                    logger.info(f"   📋 Available fields: {list(data.keys())}")
+
+                    # Log specific important fields
+                    if 'product_tags' in data:
+                        logger.info(f"   🛍️ Product tags found: {len(data['product_tags'])} items")
+                    if 'shopping_outbound_link' in data:
+                        logger.info(f"   🔗 Shopping outbound link: {data['shopping_outbound_link']}")
+                    if 'caption' in data:
+                        caption_preview = data['caption'][:100] if data['caption'] else 'None'
+                        logger.info(f"   📝 Caption preview: {caption_preview}")
+
+                    return data
+
+                elif response.status_code == 400:
+                    logger.warning(f"   ⚠️ ID format {i} invalid (400): {response.text[:200]}")
+                    continue
+
                 else:
-                    logger.warning(f"Could not fetch additional details for reel {reel_id}")
+                    logger.error(f"   ❌ API Error {response.status_code}: {response.text[:300]}")
 
-            # If this is a reel but no shop URLs found after all attempts
-            if attachment_type == 'ig_reel' and not shop_urls:
-                logger.info("ℹ️ No shop URLs found in reel after comprehensive search")
-                logger.info("📝 Note: If this was an Ad with Shop Now button, it should have been caught by ad_id detection")
+                    # Log specific error types
+                    if response.status_code == 401:
+                        logger.error(f"   🔐 AUTHENTICATION ERROR: Token may be invalid or expired")
+                    elif response.status_code == 403:
+                        logger.error(f"   🚫 PERMISSION ERROR: Missing required permissions")
+                    elif response.status_code == 404:
+                        logger.error(f"   🔍 NOT FOUND: Media ID {test_id} doesn't exist")
 
-        elif attachment_type == 'share':
-            # Regular shared post
-            if 'url' in payload:
-                shop_urls.append(payload['url'])
-            if 'title' in payload:
-                title_urls = extract_urls_from_text(payload['title'])
-                shop_urls.extend(title_urls)
-            if 'description' in payload:
-                desc_urls = extract_urls_from_text(payload['description'])
-                shop_urls.extend(desc_urls)
+            logger.warning(f"   ⚠️ All {len(media_ids_to_try)} ID formats failed")
 
-        # Check for direct shop URLs in payload
-        if 'shop_url' in payload:
-            shop_urls.append(payload['shop_url'])
-        elif 'product_url' in payload:
-            shop_urls.append(payload['product_url'])
-        elif 'url' in payload:
-            url = payload['url']
-            # Filter out Facebook/Instagram internal URLs (video CDN, etc.)
-            if not any(domain in url for domain in ['lookaside.fbsbx.com', 'ig_messaging_cdn', 'scontent']):
+        except requests.Timeout:
+            logger.error(f"   ⏰ TIMEOUT: API request timed out after 15 seconds")
+        except requests.ConnectionError:
+            logger.error(f"   🌐 CONNECTION ERROR: Unable to reach Instagram API")
+        except Exception as e:
+            logger.error(f"   💥 UNEXPECTED ERROR: {type(e).__name__}: {e}")
+            import traceback
+            logger.error(f"   📊 Full traceback: {traceback.format_exc()}")
+
+        return {}
+
+    def extract_shopping_urls_from_media(self, media_data: Dict) -> List[str]:
+        """
+        Extract all shopping URLs from media data
+        """
+        shopping_urls = []
+
+        # Check for direct shopping outbound link
+        if 'shopping_outbound_link' in media_data:
+            shopping_urls.append(media_data['shopping_outbound_link'])
+            logger.info(f"Found shopping_outbound_link: {media_data['shopping_outbound_link']}")
+
+        # Check for product tags with website URLs
+        if 'product_tags' in media_data:
+            for tag in media_data.get('product_tags', []):
+                if isinstance(tag, dict):
+                    # Check for product object with website_url
+                    product = tag.get('product', {})
+                    if 'website_url' in product:
+                        shopping_urls.append(product['website_url'])
+                        product_name = product.get('name', 'Unknown')
+                        logger.info(f"Found product URL: {product['website_url']} (Product: {product_name})")
+
+                    # Check for direct product_url (legacy format)
+                    if 'product_url' in tag:
+                        shopping_urls.append(tag['product_url'])
+                        logger.info(f"Found product_url: {tag['product_url']}")
+
+        # Check children media (for carousels)
+        if 'children' in media_data:
+            children = media_data['children']
+            if isinstance(children, dict) and 'data' in children:
+                for child in children['data']:
+                    child_urls = self.extract_shopping_urls_from_media(child)
+                    shopping_urls.extend(child_urls)
+
+        # Extract URLs from caption
+        if 'caption' in media_data:
+            caption_urls = self.extract_urls_from_text(media_data['caption'])
+            # Filter to only include likely shopping URLs
+            for url in caption_urls:
+                if self.is_likely_shopping_url(url):
+                    shopping_urls.append(url)
+                    logger.info(f"Found shopping URL in caption: {url}")
+
+        return list(set(shopping_urls))  # Remove duplicates
+
+    def extract_urls_from_text(self, text: str) -> List[str]:
+        """Extract URLs from text"""
+        if not text:
+            return []
+
+        url_pattern = r'https?://[^\s<>"{}|\\^`\[\]]+'
+        urls = re.findall(url_pattern, text, re.IGNORECASE)
+        return urls
+
+    def is_likely_shopping_url(self, url: str) -> bool:
+        """Check if URL is likely a shopping/product URL"""
+        # Filter out social media and CDN URLs
+        excluded_domains = [
+            'instagram.com', 'facebook.com', 'fb.me',
+            'lookaside.fbsbx.com', 'scontent', 'twitter.com',
+            'youtube.com', 'tiktok.com', 'linkedin.com'
+        ]
+
+        parsed = urlparse(url.lower())
+        domain = parsed.netloc
+
+        for excluded in excluded_domains:
+            if excluded in domain:
+                return False
+
+        # Check for common e-commerce indicators (generic patterns)
+        shopping_indicators = [
+            '/product', '/shop', '/buy', '/store', '/item', '/cart',
+            '/checkout', '/order', '/purchase', '/collection',
+            'shopify.', '.store', '.shop', '.buy'  # Generic e-commerce platforms
+        ]
+
+        url_lower = url.lower()
+        for indicator in shopping_indicators:
+            if indicator in url_lower:
+                return True
+
+        # Check for shortened URLs that might be shopping links
+        shorteners = ['bit.ly', 'linktr.ee', 'link.bio', 'linkin.bio']
+        for shortener in shorteners:
+            if shortener in domain:
+                return True
+
+        return False
+
+    def get_business_discovery_data(self, username: str) -> Dict:
+        """
+        Use Business Discovery API to get public media data
+        """
+        try:
+            url = f"{self.graph_api_url}/{self.ig_business_id}"
+            params = {
+                'fields': f'business_discovery.username({username}){{media{{caption,media_url,permalink,shopping_outbound_link,product_tags}}}}',
+                'access_token': self.access_token
+            }
+
+            response = requests.get(url, params=params)
+            if response.status_code == 200:
+                return response.json()
+        except Exception as e:
+            logger.error(f"Business Discovery error: {e}")
+
+        return {}
+
+    def process_shared_content(self, webhook_data: Dict) -> List[str]:
+        """
+        Main method to process shared content and extract shopping URLs
+        """
+        all_shopping_urls = []
+
+        # Extract from attachments
+        message = webhook_data.get('message', {})
+        attachments = message.get('attachments', [])
+
+        for attachment in attachments:
+            if attachment.get('type') == 'ig_reel':
+                payload = attachment.get('payload', {})
+
+                # Try to get permalink from title or other fields
+                title = payload.get('title', '')
+
+                # Method 1: Try using reel_video_id with proper format
+                reel_id = payload.get('reel_video_id')
+                if reel_id:
+                    media_data = self.get_media_with_product_tags(reel_id)
+                    if media_data:
+                        urls = self.extract_shopping_urls_from_media(media_data)
+                        all_shopping_urls.extend(urls)
+
+                # Method 2: Extract from title/description
+                if title:
+                    urls = self.extract_urls_from_text(title)
+                    for url in urls:
+                        if self.is_likely_shopping_url(url):
+                            all_shopping_urls.append(url)
+
+                # Method 3: Try to extract username and use Business Discovery
+                # This would require parsing the username from the content
+
+        # Remove duplicates and return
+        return list(set(all_shopping_urls))
+
+def analyze_caption_for_products(caption: str) -> Dict:
+    """
+    Analyze caption for product mentions and shopping hints
+    """
+    product_hints = {
+        'brand_mentions': [],
+        'product_keywords': [],
+        'price_mentions': [],
+        'call_to_actions': []
+    }
+
+    # Extract brand mentions (detect any branded mentions)
+    brand_patterns = [
+        r'@[a-zA-Z0-9_.]+',  # Instagram handles
+        r'#[a-zA-Z0-9_]+brand',  # Brand hashtags
+        r'#[a-zA-Z0-9_]+official',  # Official hashtags
+        r'\b[A-Z][a-zA-Z0-9&\.]+(?:\s+[A-Z][a-zA-Z0-9&\.]*)*\b'  # Capitalized brand names
+    ]
+
+    for pattern in brand_patterns:
+        brands = re.findall(pattern, caption)
+        product_hints['brand_mentions'].extend(brands)
+
+    # Extract price mentions
+    price_patterns = [
+        r'₹\s*[\d,]+',
+        r'Rs\.?\s*[\d,]+',
+        r'INR\s*[\d,]+',
+        r'\$\s*[\d,]+',
+        r'[\d,]+\s*/-'
+    ]
+
+    for pattern in price_patterns:
+        prices = re.findall(pattern, caption, re.IGNORECASE)
+        product_hints['price_mentions'].extend(prices)
+
+    # Extract CTAs
+    cta_phrases = [
+        'shop now', 'buy now', 'order now', 'get it now',
+        'link in bio', 'swipe up', 'check out', 'available at'
+    ]
+
+    for cta in cta_phrases:
+        if cta in caption.lower():
+            product_hints['call_to_actions'].append(cta)
+
+    # Extract product keywords
+    product_keywords = [
+        'dress', 'shirt', 'shoes', 'bag', 'watch', 'jewelry',
+        'makeup', 'skincare', 'perfume', 'electronics'
+    ]
+
+    for keyword in product_keywords:
+        if keyword in caption.lower():
+            product_hints['product_keywords'].append(keyword)
+
+    return product_hints
+
+def debug_webhook_data(event: Dict):
+    """Debug function to analyze webhook structure"""
+
+    logger.info("=== WEBHOOK DATA ANALYSIS ===")
+
+    # Check for different attachment types
+    message = event.get('message', {})
+    attachments = message.get('attachments', [])
+
+    for i, attachment in enumerate(attachments):
+        logger.info(f"Attachment {i+1}:")
+        logger.info(f"  Type: {attachment.get('type')}")
+
+        payload = attachment.get('payload', {})
+        logger.info(f"  Payload keys: {list(payload.keys())}")
+
+        # For reels, check specific fields
+        if attachment.get('type') == 'ig_reel':
+            logger.info(f"  Reel video ID: {payload.get('reel_video_id')}")
+            logger.info(f"  Title present: {'title' in payload}")
+            logger.info(f"  URL: {payload.get('url', 'Not found')[:50]}...")
+
+            # Check if there are any shopping-related fields
+            shopping_fields = ['product_id', 'product_url', 'shop_url',
+                             'shopping_url', 'merchant_url', 'product_tags']
+            for field in shopping_fields:
+                if field in payload:
+                    logger.info(f"  🛍️ Found shopping field: {field} = {payload[field]}")
+
+    logger.info("=== END ANALYSIS ===")
+
+def enhanced_extract_shop_urls(text: str, attachments: List[Dict], event_data: Dict,
+                               access_token: str, ig_business_id: str) -> List[str]:
+    """
+    Enhanced shop URL extraction using the new extractor class
+    """
+    extractor = InstagramShoppingExtractor(access_token, ig_business_id)
+
+    # Process the webhook data
+    shop_urls = extractor.process_shared_content(event_data)
+
+    # Also extract from text if provided
+    if text:
+        text_urls = extractor.extract_urls_from_text(text)
+        for url in text_urls:
+            if extractor.is_likely_shopping_url(url):
                 shop_urls.append(url)
-            else:
-                logger.info(f"Skipping internal media URL: {url[:100]}...")
 
-        # Also check for description field which may contain URLs
-        if 'description' in payload:
-            desc_urls = extract_urls_from_text(payload['description'])
-            shop_urls.extend(desc_urls)
-
-    # Expand shortened URLs and remove duplicates
-    expanded_urls = []
-    for url in shop_urls:
-        if any(domain in url for domain in ['bit.ly', 'linktr.ee', 'link.bio', 'linkin.bio', 'tinyurl.com']):
-            expanded_url = expand_shortened_url(url)
-            expanded_urls.append(expanded_url)
-        else:
-            expanded_urls.append(url)
-
-    return list(set(expanded_urls))
+    return list(set(shop_urls))
 
 def get_instagram_media_details(media_id: str) -> Dict:
     """Fetch additional media details using Instagram Graph API"""
@@ -424,7 +664,32 @@ def try_alternative_media_access(media_id: str, access_token: str) -> Dict:
 processed_messages = set()
 
 def process_instagram_message(event: Dict) -> ProductData:
-    """Process Instagram message and extract shop URLs only"""
+    """Process Instagram message and extract shop URLs with enhanced extraction"""
+
+    # 🔐 TOKEN AND CREDENTIALS VALIDATION
+    logger.info("🔐 CREDENTIALS CHECK:")
+    logger.info(f"   📟 PAGE_ACCESS_TOKEN: {'✅ Set' if config.PAGE_ACCESS_TOKEN else '❌ Missing'} (Length: {len(config.PAGE_ACCESS_TOKEN) if config.PAGE_ACCESS_TOKEN else 0})")
+    logger.info(f"   🆔 INSTAGRAM_BUSINESS_ID: {'✅ Set' if config.INSTAGRAM_BUSINESS_ACCOUNT_ID else '❌ Missing'} ({config.INSTAGRAM_BUSINESS_ACCOUNT_ID})")
+    logger.info(f"   🔑 APP_SECRET: {'✅ Set' if config.APP_SECRET else '❌ Missing'} (Length: {len(config.APP_SECRET) if config.APP_SECRET else 0})")
+    logger.info(f"   📋 VERIFY_TOKEN: {'✅ Set' if config.VERIFY_TOKEN else '❌ Missing'} ({config.VERIFY_TOKEN})")
+    logger.info(f"   🌐 GRAPH_API_VERSION: {config.GRAPH_API_VERSION}")
+
+    # Token validation
+    if config.PAGE_ACCESS_TOKEN:
+        # Extract token parts for debugging (safely)
+        token_parts = config.PAGE_ACCESS_TOKEN.split('|')
+        if len(token_parts) >= 2:
+            logger.info(f"   🔍 Token structure: {len(token_parts)} parts")
+            logger.info(f"   🔍 Token prefix: {config.PAGE_ACCESS_TOKEN[:20]}...")
+            logger.info(f"   🔍 Token suffix: ...{config.PAGE_ACCESS_TOKEN[-10:]}")
+        else:
+            logger.warning(f"   ⚠️ Token format unusual: {config.PAGE_ACCESS_TOKEN[:30]}...")
+
+    # Initialize extractor with your credentials
+    extractor = InstagramShoppingExtractor(
+        access_token=config.PAGE_ACCESS_TOKEN,
+        ig_business_id=config.INSTAGRAM_BUSINESS_ACCOUNT_ID
+    )
 
     # Initialize with basic data
     product_data = ProductData(
@@ -440,15 +705,251 @@ def process_instagram_message(event: Dict) -> ProductData:
 
     # Check if this is an unsupported message (often shared posts)
     if message.get('is_unsupported'):
-        logger.info("🔍 Processing unsupported message (likely shared post)")
+        logger.info("📝 Processing unsupported message (likely shared post)")
         product_data.post_type = 'unsupported_share'
 
-    # Extract shop URLs from text and attachments
+    # Extract text and attachments
     text = message.get('text', '')
     attachments = message.get('attachments', [])
 
-    shop_urls = extract_shop_urls(text, attachments, event)
-    product_data.shop_urls = shop_urls
+    # Add comprehensive debugging
+    debug_webhook_data(event)
+
+    # Use enhanced extraction for shopping URLs
+    shop_urls = []
+
+    # 🚀 HYBRID APPROACH: Combine working patterns with Instagram API leverage
+    for attachment in attachments:
+        attachment_type = attachment.get('type')
+        payload = attachment.get('payload', {})
+
+        logger.info(f"🔍 Processing attachment type: {attachment_type}")
+        logger.info(f"📋 Payload keys: {list(payload.keys())}")
+
+        if attachment_type == 'share':
+            # ⭐ PRIMARY: Direct URL extraction (PROVEN WORKING)
+            product_data.post_type = 'share'
+
+            # Layer 1: Direct URL extraction (webhook_receiverX.py approach)
+            post_url = payload.get('url', '')
+            if post_url:
+                shop_urls.append(post_url)
+                logger.info(f"✅ Layer 1 - Direct shared post URL: {post_url}")
+
+            # Layer 2: Extract URLs from description & title (PROVEN WORKING)
+            description = payload.get('description', '')
+            if description:
+                desc_urls = extractor.extract_urls_from_text(description)
+                shop_urls.extend(desc_urls)
+                logger.info(f"✅ Layer 2 - Found {len(desc_urls)} URLs in description: {desc_urls}")
+
+            title = payload.get('title', '')
+            if title:
+                title_urls = extractor.extract_urls_from_text(title)
+                shop_urls.extend(title_urls)
+                logger.info(f"✅ Layer 2 - Found {len(title_urls)} URLs in title: {title_urls}")
+
+            # Layer 3: 🎯 INSTAGRAM API LEVERAGE - Extract media ID and get detailed data
+            if post_url and 'instagram.com' in post_url:
+                logger.info(f"🚀 Layer 3 - Instagram API leverage for: {post_url}")
+                media_id = extractor.extract_media_id_from_permalink(post_url)
+                if media_id:
+                    media_data = extractor.get_media_with_product_tags(media_id)
+                    if media_data:
+                        api_urls = extractor.extract_shopping_urls_from_media(media_data)
+                        shop_urls.extend(api_urls)
+                        logger.info(f"🎯 API extracted {len(api_urls)} additional URLs: {api_urls}")
+
+                        # BONUS: Extract from API caption
+                        if 'caption' in media_data:
+                            caption_urls = extractor.extract_urls_from_text(media_data['caption'])
+                            filtered_caption_urls = [url for url in caption_urls if extractor.is_likely_shopping_url(url)]
+                            shop_urls.extend(filtered_caption_urls)
+                            logger.info(f"🎯 API caption extracted {len(filtered_caption_urls)} URLs: {filtered_caption_urls}")
+
+        elif attachment_type == 'ig_reel':
+            # 🎬 INSTAGRAM REEL: Maximum API leverage
+            product_data.post_type = 'ig_reel'
+
+            # Layer 1: Direct title/description extraction (WORKING)
+            title = payload.get('title', '')
+            if title:
+                title_urls = extractor.extract_urls_from_text(title)
+                for url in title_urls:
+                    if extractor.is_likely_shopping_url(url):
+                        shop_urls.append(url)
+                        logger.info(f"✅ Layer 1 - Reel title URL: {url}")
+
+            # Layer 2: 🚀 INSTAGRAM API LEVERAGE for reels
+            reel_id = payload.get('reel_video_id')
+            if reel_id:
+                logger.info(f"🚀 Layer 2 - Instagram API leverage for reel: {reel_id}")
+
+                # Try multiple API approaches for reels
+                media_data = extractor.get_media_with_product_tags(reel_id)
+                if media_data:
+                    # Extract shopping URLs from API
+                    api_urls = extractor.extract_shopping_urls_from_media(media_data)
+                    shop_urls.extend(api_urls)
+                    logger.info(f"🎯 Reel API extracted {len(api_urls)} URLs: {api_urls}")
+
+                    # Extract from API caption with advanced filtering
+                    if 'caption' in media_data:
+                        caption_text = media_data['caption']
+                        caption_urls = extractor.extract_urls_from_text(caption_text)
+
+                        # Advanced filtering for shopping URLs
+                        shopping_caption_urls = []
+                        for url in caption_urls:
+                            if extractor.is_likely_shopping_url(url):
+                                shopping_caption_urls.append(url)
+
+                        shop_urls.extend(shopping_caption_urls)
+                        logger.info(f"🎯 Reel caption extracted {len(shopping_caption_urls)} shopping URLs: {shopping_caption_urls}")
+
+                        # Analyze caption for shopping hints
+                        hints = analyze_caption_for_products(caption_text)
+                        if hints['brand_mentions'] or hints['call_to_actions']:
+                            logger.info(f"💡 Shopping hints found: {hints}")
+
+                # Alternative API approach: Try Business Discovery if main approach fails
+                if not shop_urls and 'permalink' in media_data:
+                    permalink = media_data['permalink']
+                    logger.info(f"🔄 Trying Business Discovery for: {permalink}")
+                    # Extract username from permalink and try Business Discovery
+                    username_match = re.search(r'instagram\.com/([^/]+)/', permalink)
+                    if username_match:
+                        username = username_match.group(1)
+                        discovery_data = extractor.get_business_discovery_data(username)
+                        if discovery_data:
+                            logger.info(f"🎯 Business Discovery data retrieved for @{username}")
+
+        elif attachment_type == 'image' or attachment_type == 'video':
+            # 📸🎥 MEDIA ATTACHMENTS: API leverage for media analysis
+            product_data.post_type = attachment_type
+            media_url = payload.get('url', '')
+
+            if media_url:
+                logger.info(f"📎 {attachment_type.title()} attachment: {media_url}")
+
+                # Check if media URL contains shopping indicators
+                if extractor.is_likely_shopping_url(media_url):
+                    shop_urls.append(media_url)
+                    logger.info(f"✅ Shopping URL in {attachment_type}: {media_url}")
+
+        elif attachment_type == 'story_mention':
+            # 📱 STORY MENTIONS: Extract with API backup
+            product_data.post_type = 'story_mention'
+            story_url = payload.get('url', '')
+
+            if story_url:
+                shop_urls.append(story_url)
+                logger.info(f"✅ Story mention URL: {story_url}")
+
+        # 🔍 COMPREHENSIVE PAYLOAD SCANNING: Extract from any URL field
+        for key, value in payload.items():
+            if 'url' in key.lower() and isinstance(value, str) and value.startswith('http'):
+                if extractor.is_likely_shopping_url(value):
+                    shop_urls.append(value)
+                    logger.info(f"✅ Found shopping URL in payload.{key}: {value}")
+
+        # 🎯 PAYLOAD INTELLIGENCE: Look for shopping-specific fields
+        shopping_fields = ['product_url', 'shop_url', 'shopping_url', 'merchant_url', 'buy_url', 'order_url']
+        for field in shopping_fields:
+            if field in payload and payload[field]:
+                shop_urls.append(payload[field])
+                logger.info(f"🛍️ Found shopping field payload.{field}: {payload[field]}")
+
+    # 💬 TEXT MESSAGE PROCESSING: Extract URLs and analyze with API leverage
+    if text:
+        logger.info(f"💬 Processing text message: {text[:100]}...")
+        text_urls = extractor.extract_urls_from_text(text)
+
+        for url in text_urls:
+            if extractor.is_likely_shopping_url(url):
+                shop_urls.append(url)
+                logger.info(f"✅ Shopping URL from text: {url}")
+
+            # 🎯 API LEVERAGE: If text contains Instagram URLs, extract via API
+            elif 'instagram.com' in url:
+                logger.info(f"🚀 Instagram URL in text - API leverage: {url}")
+                media_id = extractor.extract_media_id_from_permalink(url)
+                if media_id:
+                    media_data = extractor.get_media_with_product_tags(media_id)
+                    if media_data:
+                        api_urls = extractor.extract_shopping_urls_from_media(media_data)
+                        shop_urls.extend(api_urls)
+                        logger.info(f"🎯 Text Instagram URL extracted {len(api_urls)} URLs: {api_urls}")
+
+        # Analyze text for shopping hints
+        if text:
+            hints = analyze_caption_for_products(text)
+            if hints['brand_mentions'] or hints['call_to_actions']:
+                logger.info(f"💡 Text shopping hints: {hints}")
+
+    # 🔗 INTELLIGENT URL EXPANSION: Enhanced with API fallbacks
+    expanded_urls = []
+    for url in shop_urls:
+        original_url = url
+
+        # Expand shortened URLs
+        if any(domain in url for domain in ['bit.ly', 'linktr.ee', 'link.tree', 'tinyurl.com', 'goo.gl', 't.co']):
+            try:
+                expanded_url = expand_shortened_url(url)
+                expanded_urls.append(expanded_url)
+                logger.info(f"🔗 Expanded: {original_url} -> {expanded_url}")
+
+                # 🎯 API LEVERAGE: If expanded URL is Instagram, extract via API
+                if 'instagram.com' in expanded_url:
+                    media_id = extractor.extract_media_id_from_permalink(expanded_url)
+                    if media_id:
+                        media_data = extractor.get_media_with_product_tags(media_id)
+                        if media_data:
+                            api_urls = extractor.extract_shopping_urls_from_media(media_data)
+                            expanded_urls.extend(api_urls)
+                            logger.info(f"🎯 Expanded Instagram URL extracted {len(api_urls)} additional URLs: {api_urls}")
+
+            except Exception as e:
+                logger.warning(f"⚠️ URL expansion failed for {url}: {e}")
+                expanded_urls.append(url)
+        else:
+            expanded_urls.append(url)
+
+    # 🧹 INTELLIGENT DEDUPLICATION: Remove duplicates while preserving quality
+    unique_urls = []
+    seen_domains = set()
+
+    for url in expanded_urls:
+        try:
+            parsed = urlparse(url)
+            domain = parsed.netloc.lower()
+            path = parsed.path
+
+            # Create a signature for the URL (domain + important path parts)
+            url_signature = f"{domain}{path}"
+
+            if url_signature not in seen_domains:
+                unique_urls.append(url)
+                seen_domains.add(url_signature)
+                logger.info(f"✅ Unique URL added: {url}")
+            else:
+                logger.info(f"🔄 Duplicate URL filtered: {url}")
+
+        except Exception as e:
+            # If URL parsing fails, still include it but check for exact duplicates
+            if url not in unique_urls:
+                unique_urls.append(url)
+                logger.info(f"✅ URL added (parsing failed): {url}")
+
+    # Final assignment
+    product_data.shop_urls = unique_urls
+
+    # 📊 EXTRACTION SUMMARY
+    logger.info(f"🎯 EXTRACTION COMPLETE:")
+    logger.info(f"   📦 Total URLs found: {len(expanded_urls)}")
+    logger.info(f"   ✨ Unique URLs: {len(unique_urls)}")
+    logger.info(f"   🛍️ Shopping URLs: {[url for url in unique_urls if extractor.is_likely_shopping_url(url)]}")
+    logger.info(f"   📱 Instagram URLs processed via API: {len([url for url in unique_urls if 'instagram.com' in url])}")
 
     # Determine post type if not already set
     if product_data.post_type == 'unknown':
@@ -470,41 +971,101 @@ def process_instagram_message(event: Dict) -> ProductData:
     return product_data
 
 def send_acknowledgment(recipient_id: str, product_data: ProductData):
-    """Send acknowledgment message back to user"""
+    """Send acknowledgment message back to user with detailed status"""
+    logger.info(f"💬 SENDING MESSAGE:")
+    logger.info(f"   👤 Recipient ID: {recipient_id}")
+    logger.info(f"   🔑 Token available: {'✅ Yes' if config.PAGE_ACCESS_TOKEN else '❌ No'}")
+
     if not config.PAGE_ACCESS_TOKEN:
-        logger.warning("Cannot send message - no page access token")
+        logger.error("❌ Cannot send message - PAGE_ACCESS_TOKEN missing")
         return
+
+    # Log token details
+    logger.info(f"   🔑 Token prefix: {config.PAGE_ACCESS_TOKEN[:20]}...")
+    logger.info(f"   🔑 Token length: {len(config.PAGE_ACCESS_TOKEN)}")
 
     # Prepare message based on what was found
     if product_data.shop_urls:
         message_text = (
             f"✅ Found {len(product_data.shop_urls)} shop URL(s)!\\n"
             f"🔍 Searching for best prices...\\n"
-            f"⏱️ This will take 15-30 seconds."
+            f"⏱️ This will take 15-30 seconds.\\n\\n"
+            f"URLs found:\\n"
         )
-    elif product_data.post_type == 'unsupported_share':
-        message_text = "📱 I see you shared a post! Looking for shop URLs..."
-    else:
-        message_text = "No URLs in the Ad. Please share a post that contains a product link or a direct product URL."
+        for i, url in enumerate(product_data.shop_urls[:3], 1):
+            domain = urlparse(url).netloc
+            message_text += f"{i}. {domain}\\n"
 
-    url = f"{config.GRAPH_API_URL}/{config.PAGE_ID}/messages"
+        if len(product_data.shop_urls) > 3:
+            message_text += f"... and {len(product_data.shop_urls) - 3} more"
+
+    elif product_data.post_type == 'ig_reel':
+        message_text = (
+            "📱 I received the reel but couldn't find shopping URLs.\\n\\n"
+            "This might be because:\\n"
+            "1. The reel doesn't have product tags\\n"
+            "2. It's not a shoppable post\\n"
+            "3. The Shop Now button data isn't accessible\\n\\n"
+            "Try sharing posts with visible product tags or Shop Now buttons."
+        )
+
+    elif product_data.post_type == 'unsupported_share':
+        message_text = "📱 I see you shared a post! However, I couldn't access its shopping data. Try sharing posts with product tags."
+
+    else:
+        message_text = "No shopping URLs found. Please share posts with:\\n• Product tags\\n• Shop Now buttons\\n• Direct product links"
+
+    logger.info(f"   📝 Message text ({len(message_text)} chars): {message_text[:100]}...")
+
+    # Send the message using the WORKING endpoint from webhook_receiverX.py
+    url = f"{config.GRAPH_API_URL}/me/messages"
     payload = {
         'recipient': {'id': recipient_id},
-        'message': {'text': message_text},
-        'messaging_type': 'RESPONSE'
+        'message': {'text': message_text}
     }
 
     headers = {'Content-Type': 'application/json'}
     params = {'access_token': config.PAGE_ACCESS_TOKEN}
 
+    logger.info(f"   📍 Sending to: {url}")
+    logger.info(f"   📦 Payload: {json.dumps(payload, indent=2)}")
+    logger.info(f"   🔑 Using token: {config.PAGE_ACCESS_TOKEN[:15]}...")
+
     try:
-        response = requests.post(url, json=payload, params=params, headers=headers)
+        logger.info(f"   🚀 Making POST request...")
+        response = requests.post(url, json=payload, params=params, headers=headers, timeout=10)
+
+        logger.info(f"   📊 Response status: {response.status_code}")
+        logger.info(f"   📊 Response headers: {dict(response.headers)}")
+        logger.info(f"   📊 Response text: {response.text}")
+
         if response.status_code == 200:
-            logger.info(f"✅ Message sent to user {recipient_id}")
+            logger.info(f"   ✅ SUCCESS: Message sent to user {recipient_id}")
+            response_data = response.json()
+            if 'message_id' in response_data:
+                logger.info(f"   📨 Message ID: {response_data['message_id']}")
         else:
-            logger.error(f"❌ Failed to send message: {response.status_code} - {response.text}")
+            logger.error(f"   ❌ FAILED: Status {response.status_code}")
+            logger.error(f"   📝 Error response: {response.text}")
+
+            # Specific error handling
+            if response.status_code == 400:
+                logger.error(f"   🔍 BAD REQUEST: Check payload format or recipient ID")
+            elif response.status_code == 401:
+                logger.error(f"   🔐 UNAUTHORIZED: Invalid or expired access token")
+            elif response.status_code == 403:
+                logger.error(f"   🚫 FORBIDDEN: Missing permissions or recipient blocked bot")
+            elif response.status_code == 429:
+                logger.error(f"   ⏱️ RATE LIMITED: Too many requests")
+
+    except requests.Timeout:
+        logger.error(f"   ⏰ TIMEOUT: Request timed out after 10 seconds")
+    except requests.ConnectionError:
+        logger.error(f"   🌐 CONNECTION ERROR: Unable to reach Facebook API")
     except Exception as e:
-        logger.error(f"Error sending acknowledgment: {e}")
+        logger.error(f"   💥 UNEXPECTED ERROR: {type(e).__name__}: {e}")
+        import traceback
+        logger.error(f"   📊 Full traceback: {traceback.format_exc()}")
 
 # ============== WEBHOOK ENDPOINTS ==============
 
@@ -556,6 +1117,32 @@ def handle_webhook():
         if config.DEBUG_MODE:
             logger.info("📥 Full Webhook Data:")
             logger.info(json.dumps(data, indent=2))
+
+        # Add comprehensive webhook structure analysis
+        logger.info("=== RAW WEBHOOK STRUCTURE ===")
+        logger.info(f"Object type: {data.get('object')}")
+        logger.info(f"Entry count: {len(data.get('entry', []))}")
+
+        for entry in data.get('entry', []):
+            logger.info(f"Entry ID: {entry.get('id')}")
+            logger.info(f"Entry time: {entry.get('time')}")
+
+            for event in entry.get('messaging', []):
+                message = event.get('message', {})
+                logger.info(f"Message keys: {list(message.keys())}")
+
+                if 'attachments' in message:
+                    for att in message['attachments']:
+                        logger.info(f"Attachment type: {att.get('type')}")
+                        payload = att.get('payload', {})
+                        logger.info(f"Payload keys: {list(payload.keys())}")
+
+                        # Check for any field containing 'shop', 'product', 'buy'
+                        for key, value in payload.items():
+                            if any(term in key.lower() for term in ['shop', 'product', 'buy', 'url']):
+                                logger.info(f"  Found shopping field: {key} = {value}")
+
+        logger.info("=== END STRUCTURE ANALYSIS ===")
 
         # Check webhook object type
         webhook_object = data.get('object')
