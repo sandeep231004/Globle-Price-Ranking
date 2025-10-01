@@ -253,10 +253,7 @@ def send_acknowledgment(recipient_id: str, product_data: ProductData):
     # Prepare message
     if product_data.downloaded_media_path:
         message_text = (
-            f"✅ Media downloaded successfully!\n"
-            f"💾 File: {os.path.basename(product_data.downloaded_media_path)}\n"
-            f"🎥 Type: {product_data.media_type}\n"
-            f"Processing for analysis..."
+            f"Looking at your product..."
         )
     else:
         message_text = "👋 Received your message. Processing..."
@@ -396,3 +393,4 @@ if __name__ == '__main__':
     logger.info(f"🔍 Debug Mode: {config.DEBUG_MODE}")
     logger.info(f"🔍 Signature Verification: {config.ENABLE_SIGNATURE_VERIFICATION}")
     app.run(host='0.0.0.0', port=port, debug=config.DEBUG_MODE)
+
