@@ -53,7 +53,7 @@ def download_instagram_media_from_cdn(cdn_url: str, sender_id: str, message_id: 
         downloads_dir = os.path.join(os.getcwd(), 'downloads')
         os.makedirs(downloads_dir, exist_ok=True)
 
-        logger.info(f"=� Starting download from CDN: {cdn_url[:100]}...")
+        logger.info(f"📥 Starting download from CDN: {cdn_url[:100]}...")
 
         # Extract asset_id from URL for filename
         parsed = urlparse(cdn_url)
@@ -73,13 +73,13 @@ def download_instagram_media_from_cdn(cdn_url: str, sender_id: str, message_id: 
             'Referer': 'https://www.facebook.com/',
         }
 
-        logger.info(f"   < Making request with headers...")
+        logger.info(f"   🌐 Making request with headers...")
         response = requests.get(cdn_url, headers=headers, stream=True, timeout=30)
         response.raise_for_status()
 
         # Determine file extension from Content-Type
         content_type = response.headers.get('content-type', '').lower()
-        logger.info(f"   =� Content-Type: {content_type}")
+        logger.info(f"   📊 Content-Type: {content_type}")
 
         if 'image/jpeg' in content_type or 'image/jpg' in content_type:
             file_extension = '.jpg'
@@ -100,12 +100,12 @@ def download_instagram_media_from_cdn(cdn_url: str, sender_id: str, message_id: 
             # Default fallback
             file_extension = '.bin'
             media_type = 'unknown'
-            logger.warning(f"   � Unknown content type: {content_type}, using .bin")
+            logger.warning(f"   ⚠️ Unknown content type: {content_type}, using .bin")
 
         output_filename = os.path.join(downloads_dir, base_filename + file_extension)
 
         # Download file in chunks
-        logger.info(f"   =� Downloading to: {output_filename}")
+        logger.info(f"   💾 Downloading to: {output_filename}")
         downloaded_size = 0
         with open(output_filename, 'wb') as file:
             for chunk in response.iter_content(chunk_size=8192):
@@ -114,10 +114,10 @@ def download_instagram_media_from_cdn(cdn_url: str, sender_id: str, message_id: 
                     downloaded_size += len(chunk)
 
         file_size = os.path.getsize(output_filename)
-        logger.info(f"    Download complete!")
-        logger.info(f"   =� File: {output_filename}")
-        logger.info(f"   =� Size: {file_size:,} bytes ({file_size / 1024:.2f} KB)")
-        logger.info(f"   <� Type: {media_type}")
+        logger.info(f"   ✅ Download complete!")
+        logger.info(f"   📦 File: {output_filename}")
+        logger.info(f"   📏 Size: {file_size:,} bytes ({file_size / 1024:.2f} KB)")
+        logger.info(f"   🎬 Type: {media_type}")
 
         return {
             'file_path': output_filename,
@@ -127,10 +127,10 @@ def download_instagram_media_from_cdn(cdn_url: str, sender_id: str, message_id: 
         }
 
     except requests.exceptions.RequestException as e:
-        logger.error(f"   L Download failed (Request Error): {e}")
+        logger.error(f"   ❌ Download failed (Request Error): {e}")
         return None
     except Exception as e:
-        logger.error(f"   =� Unexpected download error: {e}")
+        logger.error(f"   ❌ Unexpected download error: {e}")
         import traceback
         logger.error(traceback.format_exc())
         return None
@@ -303,10 +303,10 @@ def verify_webhook():
     logger.info(f"Webhook verification: mode={mode}, token_provided={bool(token)}")
 
     if mode == 'subscribe' and token == config.VERIFY_TOKEN:
-        logger.info(" Webhook verified successfully")
+        logger.info("✅ Webhook verified successfully")
         return Response(challenge, status=200, mimetype='text/plain')
 
-    logger.error("L Webhook verification failed")
+    logger.error("❌ Webhook verification failed")
     return Response('Forbidden', status=403)
 
 @app.route('/webhook', methods=['POST'])
