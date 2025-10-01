@@ -182,7 +182,7 @@ def verify_webhook_signature(payload: bytes, signature: str) -> bool:
 def process_instagram_message(event: Dict) -> ProductData:
     """Process Instagram message and extract data with media download"""
 
-    logger.info("=� PROCESSING INSTAGRAM MESSAGE")
+    logger.info("📨 PROCESSING INSTAGRAM MESSAGE")
 
     # Initialize product data
     product_data = ProductData(
@@ -204,49 +204,62 @@ def process_instagram_message(event: Dict) -> ProductData:
 
         logger.info(f"🔍 Processing attachment type: {attachment_type}")
 
-        if attachment_type == 'share':
-            product_data.post_type = 'share'
+        # Set post type based on attachment type
+        product_data.post_type = attachment_type
 
-            # Get CDN URL
-            cdn_url = payload.get('url', '')
-            if cdn_url and 'lookaside.fbsbx.com' in cdn_url:
-                logger.info(f"🎯 Found CDN URL: {cdn_url[:100]}...")
-                product_data.cdn_url = cdn_url
+        # Extract CDN URL from payload
+        # All Instagram media types (ig_reel, share, image, video, story_mention, etc.)
+        # have CDN URLs in payload.url
+        cdn_url = payload.get('url', '')
 
-                # Download the media
-                download_result = download_instagram_media_from_cdn(
-                    cdn_url,
-                    product_data.sender_id,
-                    product_data.message_id
-                )
+        # Log additional metadata for reels
+        if attachment_type == 'ig_reel':
+            reel_id = payload.get('reel_video_id', '')
+            title = payload.get('title', '')
+            logger.info(f"📹 Instagram Reel detected - ID: {reel_id}")
+            if title:
+                logger.info(f"📝 Title: {title[:100]}...")
 
-                if download_result:
-                    product_data.downloaded_media_path = download_result['file_path']
-                    product_data.media_type = download_result['media_type']
-                    logger.info(f" Media downloaded successfully: {download_result['file_path']}")
-                else:
-                    logger.error("L Media download failed")
+        # Download media if CDN URL is present
+        if cdn_url and 'lookaside.fbsbx.com' in cdn_url:
+            logger.info(f"🎯 Found CDN URL: {cdn_url[:100]}...")
+            product_data.cdn_url = cdn_url
 
+            # Download the media
+            download_result = download_instagram_media_from_cdn(
+                cdn_url,
+                product_data.sender_id,
+                product_data.message_id
+            )
+
+            if download_result:
+                product_data.downloaded_media_path = download_result['file_path']
+                product_data.media_type = download_result['media_type']
+                logger.info(f"✅ Media downloaded successfully: {download_result['file_path']}")
+            else:
+                logger.error("❌ Media download failed")
+        else:
+            logger.warning(f"⚠️ No CDN URL found for attachment type: {attachment_type}")
     return product_data
 
 def send_acknowledgment(recipient_id: str, product_data: ProductData):
     """Send acknowledgment message back to user"""
-    logger.info(f"=� SENDING ACKNOWLEDGMENT TO: {recipient_id}")
+    logger.info(f"💬 SENDING ACKNOWLEDGMENT TO: {recipient_id}")
 
     if not config.PAGE_ACCESS_TOKEN:
-        logger.error("L Cannot send message - PAGE_ACCESS_TOKEN missing")
+        logger.error("❌ Cannot send message - PAGE_ACCESS_TOKEN missing")
         return
 
     # Prepare message
     if product_data.downloaded_media_path:
         message_text = (
-            f" Media downloaded successfully!\n"
-            f"=� File: {os.path.basename(product_data.downloaded_media_path)}\n"
-            f"<� Type: {product_data.media_type}\n"
+            f"✅ Media downloaded successfully!\n"
+            f"💾 File: {os.path.basename(product_data.downloaded_media_path)}\n"
+            f"🎥 Type: {product_data.media_type}\n"
             f"Processing for analysis..."
         )
     else:
-        message_text = "Received your message. Processing..."
+        message_text = "👋 Received your message. Processing..."
 
     # Send message
     url = f"{config.GRAPH_API_URL}/me/messages"
@@ -262,12 +275,12 @@ def send_acknowledgment(recipient_id: str, product_data: ProductData):
         response = requests.post(url, json=payload, params=params, headers=headers, timeout=10)
 
         if response.status_code == 200:
-            logger.info(f" Message sent successfully")
+            logger.info(f"✅ Message sent successfully")
         else:
-            logger.error(f"L Message send failed: {response.status_code} - {response.text}")
+            logger.error(f"❌ Message send failed: {response.status_code} - {response.text}")
 
     except Exception as e:
-        logger.error(f"=� Message send error: {e}")
+        logger.error(f"❌ Message send error: {e}")
 
 # ============== WEBHOOK ENDPOINTS ==============
 
@@ -275,7 +288,7 @@ def send_acknowledgment(recipient_id: str, product_data: ProductData):
 def home():
     """Home endpoint for health check"""
     return jsonify({
-        'status': 'running',
+        'status': '✅ Running',
         'service': 'Instagram Media Downloader',
         'timestamp': datetime.now().isoformat()
     })
@@ -306,14 +319,14 @@ def handle_webhook():
 
     if config.ENABLE_SIGNATURE_VERIFICATION:
         if not verify_webhook_signature(raw_data, signature):
-            logger.error("L Invalid webhook signature")
+            logger.error("❌ Invalid webhook signature")
             return Response('Unauthorized', status=401)
 
     try:
         data = request.get_json()
 
         if config.DEBUG_MODE:
-            logger.info("=� Full Webhook Data:")
+            logger.info("🔍 Full Webhook Data:")
             logger.info(json.dumps(data, indent=2))
 
         # Process webhook
@@ -338,18 +351,18 @@ def handle_webhook():
                             if message.get('is_echo') or 'read' in event:
                                 continue
 
-                            logger.info(f"=� Processing message from: {sender_id}")
+                            logger.info(f"🔍 Processing message from: {sender_id}")
 
                             # Process message and download media
                             product_data = process_instagram_message(event)
 
                             # Log results
                             logger.info("=" * 50)
-                            logger.info("=� PROCESSING RESULTS:")
-                            logger.info(f"   =d Sender: {product_data.sender_id}")
-                            logger.info(f"   =� Type: {product_data.post_type}")
-                            logger.info(f"   =� Downloaded: {product_data.downloaded_media_path}")
-                            logger.info(f"   <� Media Type: {product_data.media_type}")
+                            logger.info("🔍 PROCESSING RESULTS:")
+                            logger.info(f"   👤 Sender: {product_data.sender_id}")
+                            logger.info(f"   🎥 Type: {product_data.post_type}")
+                            logger.info(f"   💾 Downloaded: {product_data.downloaded_media_path}")
+                            logger.info(f"   🎥 Media Type: {product_data.media_type}")
                             logger.info("=" * 50)
 
                             # Send acknowledgment
@@ -358,7 +371,7 @@ def handle_webhook():
         return Response('EVENT_RECEIVED', status=200)
 
     except Exception as e:
-        logger.error(f"L Webhook processing error: {e}")
+        logger.error(f"❌ Webhook processing error: {e}")
         import traceback
         logger.error(traceback.format_exc())
         return Response('EVENT_RECEIVED', status=200)
@@ -379,7 +392,7 @@ def health_check():
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
-    logger.info(f"=� Starting Instagram Media Downloader on port {port}")
-    logger.info(f"= Debug Mode: {config.DEBUG_MODE}")
-    logger.info(f"= Signature Verification: {config.ENABLE_SIGNATURE_VERIFICATION}")
+    logger.info(f"🚀 Starting Instagram Media Downloader on port {port}")
+    logger.info(f"🔍 Debug Mode: {config.DEBUG_MODE}")
+    logger.info(f"🔍 Signature Verification: {config.ENABLE_SIGNATURE_VERIFICATION}")
     app.run(host='0.0.0.0', port=port, debug=config.DEBUG_MODE)
