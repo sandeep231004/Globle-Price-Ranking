@@ -1,0 +1,27 @@
+# Product Discovery Pipeline - Dependencies
+
+# Core Framework
+flask==3.0.0
+gunicorn==21.2.0
+python-dotenv==1.0.0
+
+# LangChain & LangGraph (Orchestration)
+langgraph==0.2.59
+langchain-core==0.3.29
+langchain==0.3.13
+langgraph-checkpoint-sqlite
+
+# VLM & AI APIs
+google-generativeai==0.8.3
+anthropic==0.42.0
+Pillow==11.0.0
+
+# Media Processing
+opencv-python==4.10.0.84
+
+# HTTP & Web
+requests==2.32.3
+httpx==0.27.0
+
+# Data Processing
+pydantic==2.10.6
