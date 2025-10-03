@@ -10,6 +10,11 @@ from flask import Flask, request, Response, jsonify
 import re
 from dataclasses import dataclass, asdict
 from urllib.parse import urlparse, parse_qs
+from threading import Thread
+from pathlib import Path
+
+# Import product pipeline
+from product_pipeline import run_pipeline
 
 # Configure detailed logging
 logging.basicConfig(
@@ -41,99 +46,38 @@ class Config:
 
 config = Config()
 
-# ============== MEDIA DOWNLOAD FUNCTIONS ==============
+# ============== MESSAGE DEDUPLICATION ==============
+# Track processed message IDs to prevent duplicate processing
+processed_messages = set()
+MAX_PROCESSED_MESSAGES = 1000  # Keep last 1000 message IDs
 
-def download_instagram_media_from_cdn(cdn_url: str, sender_id: str, message_id: str) -> Optional[Dict[str, str]]:
-    """
-    Download media (image/video) from Instagram messaging CDN URL
-    Returns dict with file_path, media_type, and file_size
-    """
-    try:
-        # Create downloads directory if it doesn't exist
-        downloads_dir = os.path.join(os.getcwd(), 'downloads')
-        os.makedirs(downloads_dir, exist_ok=True)
+def is_message_processed(message_id: str) -> bool:
+    """Check if message has already been processed"""
+    return message_id in processed_messages
 
-        logger.info(f"📥 Starting download from CDN: {cdn_url[:100]}...")
+def mark_message_processed(message_id: str):
+    """Mark message as processed"""
+    processed_messages.add(message_id)
+    # Keep set size manageable
+    if len(processed_messages) > MAX_PROCESSED_MESSAGES:
+        # Remove oldest (first) items
+        processed_messages.pop()
 
-        # Extract asset_id from URL for filename
-        parsed = urlparse(cdn_url)
-        query_params = parse_qs(parsed.query)
-        asset_id = query_params.get('asset_id', ['unknown'])[0]
+# ============== DIRECTORY MANAGEMENT ==============
+def ensure_directories():
+    """Ensure all required directories exist"""
+    directories = [
+        'downloads',
+        'extracted_frames',
+        'extraction_results',
+        'pipeline_results'
+    ]
+    for dir_name in directories:
+        Path(dir_name).mkdir(exist_ok=True)
+    logger.info("✅ All directories ensured")
 
-        # Create unique filename with sender and message info
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        base_filename = f"media_{sender_id}_{message_id}_{asset_id}_{timestamp}"
-
-        # Make request with proper headers to mimic browser
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-            'Accept': '*/*',
-            'Accept-Encoding': 'gzip, deflate, br',
-            'Connection': 'keep-alive',
-            'Referer': 'https://www.facebook.com/',
-        }
-
-        logger.info(f"   🌐 Making request with headers...")
-        response = requests.get(cdn_url, headers=headers, stream=True, timeout=30)
-        response.raise_for_status()
-
-        # Determine file extension from Content-Type
-        content_type = response.headers.get('content-type', '').lower()
-        logger.info(f"   📊 Content-Type: {content_type}")
-
-        if 'image/jpeg' in content_type or 'image/jpg' in content_type:
-            file_extension = '.jpg'
-            media_type = 'image'
-        elif 'image/png' in content_type:
-            file_extension = '.png'
-            media_type = 'image'
-        elif 'image/gif' in content_type:
-            file_extension = '.gif'
-            media_type = 'image'
-        elif 'video/mp4' in content_type:
-            file_extension = '.mp4'
-            media_type = 'video'
-        elif 'video/' in content_type:
-            file_extension = '.mp4'
-            media_type = 'video'
-        else:
-            # Default fallback
-            file_extension = '.bin'
-            media_type = 'unknown'
-            logger.warning(f"   ⚠️ Unknown content type: {content_type}, using .bin")
-
-        output_filename = os.path.join(downloads_dir, base_filename + file_extension)
-
-        # Download file in chunks
-        logger.info(f"   💾 Downloading to: {output_filename}")
-        downloaded_size = 0
-        with open(output_filename, 'wb') as file:
-            for chunk in response.iter_content(chunk_size=8192):
-                if chunk:
-                    file.write(chunk)
-                    downloaded_size += len(chunk)
-
-        file_size = os.path.getsize(output_filename)
-        logger.info(f"   ✅ Download complete!")
-        logger.info(f"   📦 File: {output_filename}")
-        logger.info(f"   📏 Size: {file_size:,} bytes ({file_size / 1024:.2f} KB)")
-        logger.info(f"   🎬 Type: {media_type}")
-
-        return {
-            'file_path': output_filename,
-            'media_type': media_type,
-            'file_size': file_size,
-            'content_type': content_type
-        }
-
-    except requests.exceptions.RequestException as e:
-        logger.error(f"   ❌ Download failed (Request Error): {e}")
-        return None
-    except Exception as e:
-        logger.error(f"   ❌ Unexpected download error: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
-        return None
+# Initialize directories on startup
+ensure_directories()
 
 # ============== DATA MODELS ==============
 @dataclass
@@ -145,8 +89,6 @@ class ProductData:
     post_type: str
     shop_urls: List[str]
     raw_webhook_data: Dict
-    downloaded_media_path: Optional[str] = None
-    media_type: Optional[str] = None
     cdn_url: Optional[str] = None
 
 # ============== UTILITY FUNCTIONS ==============
@@ -220,45 +162,22 @@ def process_instagram_message(event: Dict) -> ProductData:
             if title:
                 logger.info(f"📝 Title: {title[:100]}...")
 
-        # Download media if CDN URL is present
+        # Store CDN URL (pipeline will handle download)
         if cdn_url and 'lookaside.fbsbx.com' in cdn_url:
             logger.info(f"🎯 Found CDN URL: {cdn_url[:100]}...")
             product_data.cdn_url = cdn_url
-
-            # Download the media
-            download_result = download_instagram_media_from_cdn(
-                cdn_url,
-                product_data.sender_id,
-                product_data.message_id
-            )
-
-            if download_result:
-                product_data.downloaded_media_path = download_result['file_path']
-                product_data.media_type = download_result['media_type']
-                logger.info(f"✅ Media downloaded successfully: {download_result['file_path']}")
-            else:
-                logger.error("❌ Media download failed")
         else:
             logger.warning(f"⚠️ No CDN URL found for attachment type: {attachment_type}")
     return product_data
 
-def send_acknowledgment(recipient_id: str, product_data: ProductData):
-    """Send acknowledgment message back to user"""
-    logger.info(f"💬 SENDING ACKNOWLEDGMENT TO: {recipient_id}")
+def send_message_to_user(recipient_id: str, message_text: str) -> bool:
+    """Send a message to Instagram user"""
+    logger.info(f"💬 SENDING MESSAGE TO: {recipient_id}")
 
     if not config.PAGE_ACCESS_TOKEN:
         logger.error("❌ Cannot send message - PAGE_ACCESS_TOKEN missing")
-        return
+        return False
 
-    # Prepare message
-    if product_data.downloaded_media_path:
-        message_text = (
-            f"Looking at your product..."
-        )
-    else:
-        message_text = "👋 Received your message. Processing..."
-
-    # Send message
     url = f"{config.GRAPH_API_URL}/me/messages"
     payload = {
         'recipient': {'id': recipient_id},
@@ -273,11 +192,140 @@ def send_acknowledgment(recipient_id: str, product_data: ProductData):
 
         if response.status_code == 200:
             logger.info(f"✅ Message sent successfully")
+            return True
         else:
             logger.error(f"❌ Message send failed: {response.status_code} - {response.text}")
+            return False
 
     except Exception as e:
         logger.error(f"❌ Message send error: {e}")
+        return False
+
+def send_acknowledgment(recipient_id: str, product_data: ProductData):
+    """Send acknowledgment message back to user"""
+    if product_data.cdn_url:
+        message_text = "🔍 Analyzing your product... I'll send you the purchase links shortly!"
+    else:
+        message_text = "👋 Received your message. Processing..."
+
+    send_message_to_user(recipient_id, message_text)
+
+def send_product_results(recipient_id: str, product_urls: List[str], product_info: Optional[Dict] = None):
+    """Send product URLs back to user"""
+    logger.info(f"📤 SENDING PRODUCT RESULTS TO: {recipient_id}")
+    logger.info(f"   URLs found: {len(product_urls)}")
+
+    if not product_urls:
+        message_text = "Sorry, I couldn't find purchase links for this product. Try sending another product!"
+        send_message_to_user(recipient_id, message_text)
+        return
+
+    # Get product name if available
+    product_name = ""
+    if product_info and product_info.get('products'):
+        first_product = product_info['products'][0]
+        brand = first_product.get('brand', '')
+        product = first_product.get('product', '')
+
+        if brand and product:
+            product_name = f" for {brand} {product}"
+        elif brand:
+            product_name = f" for {brand}"
+        elif product:
+            product_name = f" for {product}"
+
+    # Send simple header
+    header = f"Here are purchase links{product_name}:\n\n"
+
+    # Send URLs in one message if possible (Instagram allows ~2000 characters)
+    # Otherwise send in batches
+    urls_per_message = 10  # Send more URLs per message
+    total_messages = (len(product_urls) + urls_per_message - 1) // urls_per_message
+
+    for i in range(0, len(product_urls), urls_per_message):
+        batch_urls = product_urls[i:i+urls_per_message]
+        batch_number = (i // urls_per_message) + 1
+
+        # Simple message format
+        if i == 0 and total_messages == 1:
+            # All URLs fit in one message
+            message_text = header
+        elif i == 0:
+            # First batch of multiple
+            message_text = header
+        else:
+            # Subsequent batches
+            message_text = f"More links (Part {batch_number}):\n\n"
+
+        # Add URLs without numbering (cleaner look)
+        for url in batch_urls:
+            message_text += f"{url}\n\n"
+
+        send_message_to_user(recipient_id, message_text.strip())
+
+    logger.info(f"✅ All product URLs sent to {recipient_id} in {total_messages} message(s)")
+
+def process_pipeline_in_background(cdn_url: str, session_id: str, sender_id: str):
+    """
+    Run product pipeline in background thread
+    This prevents webhook timeout and allows async processing
+
+    IMPORTANT: sender_id is passed as parameter to ensure correct user receives results
+
+    Args:
+        cdn_url: CDN URL to download (pipeline will handle download)
+        session_id: Unique session ID for tracking
+        sender_id: Instagram user ID to send results to
+    """
+    logger.info(f"🚀 Starting pipeline in background for session: {session_id}")
+    logger.info(f"   👤 Sender ID (will receive results): {sender_id}")
+
+    try:
+        # Run full pipeline (download → extract → search)
+        result = run_pipeline(
+            cdn_url=cdn_url,
+            session_id=session_id,
+            sender_id=sender_id,
+            save_results=True
+        )
+
+        # Verify sender_id from result matches our sender_id
+        result_sender_id = result.get('sender_id')
+        if result_sender_id != sender_id:
+            logger.error(f"⚠️ SENDER ID MISMATCH: Expected {sender_id}, got {result_sender_id}")
+
+        # Check if pipeline succeeded
+        if result.get('completed_successfully'):
+            product_urls = result.get('product_urls', [])
+            product_info = result.get('product_info')
+
+            logger.info(f"✅ Pipeline completed successfully for sender: {sender_id}")
+            logger.info(f"   Product URLs found: {len(product_urls)}")
+            logger.info(f"   🎯 Sending results to: {sender_id}")
+
+            # Send results to user (sender_id ensures correct recipient)
+            send_product_results(sender_id, product_urls, product_info)
+        else:
+            # Pipeline failed
+            errors = result.get('errors', [])
+            logger.error(f"❌ Pipeline failed for {sender_id}: {errors}")
+
+            # Send error message to user
+            send_message_to_user(
+                sender_id,
+                "😔 Sorry, I encountered an issue while processing your product. Please try again!"
+            )
+
+    except Exception as e:
+        logger.error(f"❌ Pipeline exception for {sender_id}: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+
+        # Send error message to user
+        send_message_to_user(
+            sender_id,
+            "😔 Sorry, something went wrong. Please try again later!"
+        )
 
 # ============== WEBHOOK ENDPOINTS ==============
 
@@ -343,12 +391,22 @@ def handle_webhook():
 
                         if 'message' in event:
                             message = event.get('message', {})
+                            message_id = message.get('mid', 'unknown')
 
                             # Skip echo and read receipts
                             if message.get('is_echo') or 'read' in event:
                                 continue
 
-                            logger.info(f"🔍 Processing message from: {sender_id}")
+                            # Check for duplicate message
+                            if is_message_processed(message_id):
+                                logger.info(f"⏭️ Skipping duplicate message: {message_id}")
+                                continue
+
+                            # Mark message as processed
+                            mark_message_processed(message_id)
+
+                            logger.info(f"🔍 Processing NEW message from: {sender_id}")
+                            logger.info(f"   Message ID: {message_id}")
 
                             # Process message and download media
                             product_data = process_instagram_message(event)
@@ -357,13 +415,38 @@ def handle_webhook():
                             logger.info("=" * 50)
                             logger.info("🔍 PROCESSING RESULTS:")
                             logger.info(f"   👤 Sender: {product_data.sender_id}")
+                            logger.info(f"   📧 Message ID: {message_id}")
                             logger.info(f"   🎥 Type: {product_data.post_type}")
-                            logger.info(f"   💾 Downloaded: {product_data.downloaded_media_path}")
-                            logger.info(f"   🎥 Media Type: {product_data.media_type}")
+                            logger.info(f"   🔗 CDN URL: {product_data.cdn_url[:80] if product_data.cdn_url else 'None'}...")
                             logger.info("=" * 50)
 
                             # Send acknowledgment
                             send_acknowledgment(sender_id, product_data)
+
+                            # If CDN URL found, run pipeline in background
+                            if product_data.cdn_url:
+                                logger.info(f"🚀 Starting product pipeline for sender: {sender_id}")
+                                logger.info(f"   📧 Session ID: {message_id}")
+                                logger.info(f"   👤 Results will be sent to: {sender_id}")
+
+                                # Start pipeline in background thread
+                                # sender_id is passed as parameter to ensure correct user receives results
+                                pipeline_thread = Thread(
+                                    target=process_pipeline_in_background,
+                                    args=(
+                                        product_data.cdn_url,  # CDN URL (pipeline will download)
+                                        message_id,            # Unique session ID
+                                        sender_id              # ← SENDER ID for routing results
+                                    ),
+                                    daemon=True,
+                                    name=f"Pipeline-{sender_id[:8]}"  # Named thread for debugging
+                                )
+                                pipeline_thread.start()
+
+                                logger.info(f"✅ Pipeline thread started: {pipeline_thread.name}")
+                                logger.info(f"   Thread will send results to sender: {sender_id}")
+                            else:
+                                logger.warning(f"⚠️ No CDN URL found for {sender_id}")
 
         return Response('EVENT_RECEIVED', status=200)
 
@@ -393,4 +476,3 @@ if __name__ == '__main__':
     logger.info(f"🔍 Debug Mode: {config.DEBUG_MODE}")
     logger.info(f"🔍 Signature Verification: {config.ENABLE_SIGNATURE_VERIFICATION}")
     app.run(host='0.0.0.0', port=port, debug=config.DEBUG_MODE)
-
