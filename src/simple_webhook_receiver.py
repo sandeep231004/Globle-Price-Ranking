@@ -63,12 +63,28 @@ def verify_webhook():
 @app.route('/webhook', methods=['POST'])
 def capture_webhook():
     """Capture raw webhook data"""
+
+    # Log EVERYTHING about the incoming request
+    logger.info("=" * 70)
+    logger.info("🔔 INCOMING REQUEST TO /webhook")
+    logger.info("=" * 70)
+    logger.info(f"Method: {request.method}")
+    logger.info(f"URL: {request.url}")
+    logger.info(f"Remote Address: {request.remote_addr}")
+    logger.info(f"Headers: {dict(request.headers)}")
+    logger.info(f"Content-Type: {request.content_type}")
+    logger.info(f"Content-Length: {request.content_length}")
+    logger.info("=" * 70)
+
     try:
         # Get raw data
         raw_data = request.get_data()
+        logger.info(f"Raw data length: {len(raw_data)} bytes")
+        logger.info(f"Raw data preview: {raw_data[:500]}")
 
         # Parse JSON
         data = request.get_json()
+        logger.info(f"JSON parsed successfully: {data is not None}")
 
         # Generate filename with timestamp
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
