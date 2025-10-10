@@ -127,7 +127,7 @@ def extract_with_google_gemini(image_paths: List[Path], custom_instruction: str 
 
     try:
         # Get enhanced extraction prompt with additional metadata fields
-        prompt = get_extraction_prompt(custom_instruction=custom_instruction)
+        prompt = get_extraction_prompt()
 
         if use_modern:
             # Use modern google.genai API
