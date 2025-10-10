@@ -53,8 +53,8 @@ def run_pipeline(
     print("\n" + "="*80)
     print("🚀 STARTING PRODUCT DISCOVERY PIPELINE")
     print("="*80)
-    print(f"📅 Started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"🆔 Session ID: {session_id}")
+    print(f"🕐 Started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"🔑 Session ID: {session_id}")
     if sender_id:
         print(f"👤 Sender ID: {sender_id}")
     print()
@@ -130,9 +130,15 @@ def run_pipeline(
     print(f"   • Saved to: pipeline_results/")
     print("="*80)
 
-    # Add sender_id to result for webhook compatibility
+    # ========================================================================
+    # ENSURE REQUIRED FIELDS FOR WEBHOOK COMPATIBILITY
+    # ========================================================================
+    # Add sender_id to result for webhook compatibility (CRITICAL FIX)
     if sender_id:
         search_result['sender_id'] = sender_id
+    else:
+        # Ensure sender_id exists in result even if not provided
+        search_result['sender_id'] = None
 
     # Add session_id to result
     if session_id:
@@ -141,10 +147,18 @@ def run_pipeline(
     # Add completion status
     search_result['completed_successfully'] = True
 
+    # Ensure product_urls key exists
+    if 'product_urls' not in search_result:
+        search_result['product_urls'] = []
+
+    # Ensure product_info key exists
+    if 'product_info' not in search_result:
+        search_result['product_info'] = extraction_result
+
     return search_result
 
 
-def run_pipeline_from_file(file_path: str, custom_instruction: str = None, urls_per_query: int = 5) -> dict:
+def run_pipeline_from_file(file_path: str, custom_instruction: str = None, urls_per_query: int = 5, sender_id: str = None) -> dict:
     """
     Execute pipeline from already-downloaded file (skip download stage)
 
@@ -152,6 +166,7 @@ def run_pipeline_from_file(file_path: str, custom_instruction: str = None, urls_
         file_path: Path to local video/image file
         custom_instruction: Optional instruction for focused extraction
         urls_per_query: Number of product URLs to find per search query
+        sender_id: Instagram sender ID (for webhook context)
 
     Returns:
         Dictionary with complete pipeline results, or None if any stage fails
@@ -159,8 +174,10 @@ def run_pipeline_from_file(file_path: str, custom_instruction: str = None, urls_
     print("\n" + "="*80)
     print("🚀 STARTING PRODUCT DISCOVERY PIPELINE (FROM LOCAL FILE)")
     print("="*80)
-    print(f"📅 Started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"🕐 Started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"📁 File: {file_path}")
+    if sender_id:
+        print(f"👤 Sender ID: {sender_id}")
     print()
 
     pipeline_start = datetime.now()
@@ -222,6 +239,27 @@ def run_pipeline_from_file(file_path: str, custom_instruction: str = None, urls_
     print(f"   • Saved to: pipeline_results/")
     print("="*80)
 
+    # ========================================================================
+    # ENSURE REQUIRED FIELDS FOR WEBHOOK COMPATIBILITY
+    # ========================================================================
+    # Add sender_id to result for webhook compatibility (CRITICAL FIX)
+    if sender_id:
+        search_result['sender_id'] = sender_id
+    else:
+        # Ensure sender_id exists in result even if not provided
+        search_result['sender_id'] = None
+
+    # Add completion status
+    search_result['completed_successfully'] = True
+
+    # Ensure product_urls key exists
+    if 'product_urls' not in search_result:
+        search_result['product_urls'] = []
+
+    # Ensure product_info key exists
+    if 'product_info' not in search_result:
+        search_result['product_info'] = extraction_result
+
     return search_result
 
 
@@ -257,7 +295,7 @@ def main():
 
     # Get mode
     print("─"*80)
-    print("📋 SELECT MODE:")
+    print("🔋 SELECT MODE:")
     print("─"*80)
     print("1. Download from CDN URL (full pipeline)")
     print("2. Process existing file (skip download)")
@@ -269,7 +307,7 @@ def main():
     if choice == '1':
         # CDN download mode
         print()
-        print("📌 Enter CDN URL:")
+        print("🔌 Enter CDN URL:")
         cdn_url = input("URL: ").strip()
 
         if not cdn_url:
@@ -282,7 +320,11 @@ def main():
         custom_instruction = input("Instruction: ").strip() or None
 
         print()
-        run_pipeline(cdn_url, custom_instruction=custom_instruction, urls_per_query=5)
+        print("👤 Optional: Enter sender ID (press Enter to skip)")
+        sender_id = input("Sender ID: ").strip() or None
+
+        print()
+        run_pipeline(cdn_url, custom_instruction=custom_instruction, urls_per_query=5, sender_id=sender_id)
 
     elif choice == '2':
         # Local file mode
@@ -300,7 +342,11 @@ def main():
         custom_instruction = input("Instruction: ").strip() or None
 
         print()
-        run_pipeline_from_file(file_path, custom_instruction=custom_instruction, urls_per_query=5)
+        print("👤 Optional: Enter sender ID (press Enter to skip)")
+        sender_id = input("Sender ID: ").strip() or None
+
+        print()
+        run_pipeline_from_file(file_path, custom_instruction=custom_instruction, urls_per_query=5, sender_id=sender_id)
 
     elif choice == '3':
         print("\n👋 Goodbye!")
