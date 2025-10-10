@@ -25,3 +25,4 @@ httpx==0.27.0
 
 # Data Processing
 pydantic==2.10.6
+

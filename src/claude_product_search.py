@@ -21,7 +21,9 @@ load_dotenv()
 # Directories
 EXTRACTION_RESULTS_DIR = Path("extraction_results")
 SEARCH_RESULTS_DIR = Path("search_results")
+PIPELINE_RESULTS_DIR = Path("pipeline_results")
 SEARCH_RESULTS_DIR.mkdir(exist_ok=True)
+PIPELINE_RESULTS_DIR.mkdir(exist_ok=True)
 
 
 class ClaudeProductSearcher:
@@ -202,6 +204,83 @@ def get_unprocessed_extractions() -> List[Path]:
             unprocessed.append(ext_file)
 
     return sorted(unprocessed, key=lambda f: f.stat().st_mtime)
+
+
+def search_from_extraction_data(extraction_data: Dict, urls_per_query: int = 5, save_to_pipeline: bool = True) -> Optional[Dict]:
+    """
+    Pipeline-friendly search: Takes extraction data directly, returns search results (saves to pipeline_results/)
+
+    Args:
+        extraction_data: Dictionary containing extraction results with 'search_queries' field
+        urls_per_query: Number of URLs to return per query (default: 5)
+        save_to_pipeline: Save results to pipeline_results/ folder (default: True)
+
+    Returns:
+        Dictionary with search results including product_urls, or None if failed
+    """
+    print("\n" + "="*70)
+    print("🔍 CLAUDE WEB SEARCH - PIPELINE MODE")
+    print("="*70)
+
+    search_queries = extraction_data.get('search_queries', [])
+
+    if not search_queries:
+        print("⚠️ No search queries found in extraction data")
+        return None
+
+    print(f"📊 Using {len(search_queries)} search queries")
+    print("🔎 Search queries:")
+    for i, query in enumerate(search_queries, 1):
+        print(f"   {i}. {query}")
+    print()
+
+    # Initialize searcher
+    searcher = ClaudeProductSearcher()
+
+    # Search for products
+    product_urls = searcher.search_products(search_queries, urls_per_query=urls_per_query)
+
+    if not product_urls:
+        print("❌ No product URLs found")
+        return None
+
+    # Calculate costs
+    search_cost = searcher.search_count * 0.01
+
+    # Create result structure matching pipeline_results format
+    result = {
+        "source_extraction": extraction_data.get("source_file", ""),
+        "extraction_timestamp": extraction_data.get("extraction_timestamp", ""),
+        "search_timestamp": datetime.now().isoformat(),
+        "model_used": searcher.model,
+        "search_method": "claude_web_search",
+        "search_queries_used": search_queries,
+        "total_urls_found": len(product_urls),
+        "api_requests_used": searcher.request_count,
+        "web_searches_performed": searcher.search_count,
+        "estimated_search_cost_usd": round(search_cost, 4),
+        "product_urls": product_urls,
+        "extraction_data": extraction_data  # Include full extraction data at the end
+    }
+
+    # Save to pipeline_results if requested
+    if save_to_pipeline:
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        output_file = PIPELINE_RESULTS_DIR / f"pipeline_result_{timestamp}.json"
+
+        with open(output_file, 'w', encoding='utf-8') as f:
+            json.dump(result, f, indent=2, ensure_ascii=False)
+
+        print("="*70)
+        print(f"✅ Search complete!")
+        print(f"   Product URLs found: {len(product_urls)}")
+        print(f"   API requests: {searcher.request_count}")
+        print(f"   Web searches: {searcher.search_count}")
+        print(f"   Search cost: ${search_cost:.4f}")
+        print(f"💾 Saved to: {output_file.name}")
+        print("="*70)
+
+    return result
 
 
 def search_extraction_file(extraction_file: Path, urls_per_query: int = 5) -> Optional[Path]:

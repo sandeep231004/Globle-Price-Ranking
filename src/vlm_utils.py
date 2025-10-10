@@ -319,6 +319,199 @@ RESPOND WITH ONLY THE JSON - no explanations, no markdown code blocks.
 """
 
 
+def get_enhanced_extraction_prompt(custom_instruction: str = None) -> str:
+    """
+    Get enhanced product extraction prompt with additional metadata fields
+
+    Args:
+        custom_instruction: Optional custom instruction from user to focus on specific details
+                          (e.g., "Focus on the shoes the person is wearing" or
+                           "Extract details about the watch in the video")
+
+    Returns:
+        Formatted prompt string
+    """
+    # Build prompt based on whether custom instruction exists
+    if custom_instruction:
+        base_prompt = f"""
+USER-FOCUSED PRODUCT EXTRACTION
+
+🎯 **USER'S SPECIFIC REQUEST**: {custom_instruction}
+
+CRITICAL INSTRUCTION: The user has a SPECIFIC question or request. Focus ONLY on extracting information that answers their request.
+
+Examples:
+- If user asks "Where can I get those shoes?" → Extract ONLY shoe information
+- If user asks "What watch is he wearing?" → Extract ONLY watch information
+- If user asks "Find me that dress" → Extract ONLY dress information
+
+Your task: Answer the user's question by extracting the specific product they're asking about.
+
+EXTRACT THE FOLLOWING INFORMATION (for the specific item the user is asking about):
+"""
+    else:
+        base_prompt = """
+COMPREHENSIVE INSTAGRAM POST ANALYSIS & PRODUCT EXTRACTION
+
+Analyze this Instagram post content and extract detailed information for product search and marketing analysis.
+
+EXTRACT THE FOLLOWING INFORMATION:
+
+1. **PRODUCT INFORMATION** (for search optimization):
+   - Brand names and product names with model/variant details
+   - Colors, sizes, versions that help identify the product
+   - Visible prices (if displayed prominently)
+   - Product category - BE SPECIFIC and accurate based on actual product function and use
+
+2. **MEDIA TYPE**:
+   - Determine if this is: "Image" or "Video"
+
+3. **CREATOR/PERSON IN VIDEO**:
+   - Attempt to identify the actual person/people appearing in the image/video
+   - Use visual recognition to identify anyone you may recognize - this could be celebrities, public figures, influencers, content creators, or any person with an online presence
+   - Do not limit recognition to only famous people - try to identify anyone if their appearance, context, or visible information provides clues to their identity
+   - If you can identify them: Provide their name (e.g., "Virat Kohli", "Kylie Jenner", "Sarah Johnson - Fitness Coach")
+   - If not identifiable: Describe them objectively (e.g., "Female fitness influencer", "Male model", "Young woman in her 20s")
+   - If no person visible: "No person visible" or "Product only"
+
+4. **POST TYPE** (Ad vs Organic):
+   - Determine if this post is an "Ad" or "Organic" content
+   - Ad indicators: "Sponsored" label, professional production quality, clear product focus with pricing/CTAs, commercial intent language ("Shop Now", "Buy", "Limited Time"), highly polished visuals, explicit promotional messaging
+   - Organic indicators: Casual/behind-the-scenes content, lifestyle context without hard selling, user testimonials, brand storytelling, educational content, community engagement focus
+
+5. **CONTENT CREATION TYPE**:
+   - Determine who created this content:
+     - "Brand Generated": Professional content from brand's marketing team or agency, polished production, official brand messaging
+     - "Influencer Generated": Content from social media influencers/creators with substantial following, partnership with brands, authentic personal style mixed with promotion
+     - "User Generated": Regular customers/users showcasing products voluntarily, authentic reviews/unboxing, casual production quality, personal testimonials
+
+6. **AD TYPE & MESSAGING** (if applicable):
+   - Identify the promotional message: "Sale", "New Launch", or other campaign type
+   - Multiple selections possible if post covers multiple themes
+
+7. **MEDIA USE CASE** (select all that apply):
+   - "How to Use?": Tutorial or demonstration of product usage
+   - "Teaser": Preview or sneak peek of upcoming product
+   - "Product Information": Detailed specs, features, benefits
+   - "Brand Information": Brand story, values, positioning
+   - "Reviews": Customer testimonials or product reviews
+   - "Look & Feel": Lifestyle imagery, aesthetic showcase, styling inspiration
+
+8. **WHAT ARE THEY SELLING** (focus/scope):
+   - "Brand": Overall brand awareness and identity
+   - "Collection": Product line or seasonal collection
+   - "Product": Specific individual product(s)
+   - Multiple selections possible
+
+9. **SEARCH QUERIES**:
+   - Ready-to-use search strings optimized for e-commerce (3-8 words each)
+   - Include brand + product + variant, commercial intent keywords
+
+OUTPUT FORMAT (JSON only, no markdown):
+{
+  "category": "specific product category",
+  "brand_information": {
+    "content_creation_type": "Brand Generated/Influencer Generated/User Generated",
+    "brand_identity": "specific brand name",
+    "brand_positioning": "luxury/premium/mid-range/budget/eco-friendly/sustainable/affordable-luxury/mass-market/etc"
+  },
+  "post_type": "Ad/Organic",
+  "creator": "Name of person in video OR description if unknown OR 'No person visible'",
+  "media_type": "Image/Video",
+  "ad_type_messaging": ["Sale", "New Launch"],
+  "media_usecase": ["How to Use?", "Teaser", "Product Information", "Brand Information", "Reviews", "Look & Feel"],
+  "what_selling": ["Brand", "Collection", "Product"],
+  "products": [
+    {
+      "brand": "Nike",
+      "product": "Air Max 270",
+      "variant": "Triple Black",
+      "category": "sneakers"
+    }
+  ],
+  "search_queries": [
+    "Nike Air Max 270 Triple Black buy online",
+    "Nike Air Max 270 Black sneakers price"
+  ],
+  "prices": ["$150", "₹12000"],
+  "keywords": ["running shoes", "black sneakers", "air cushion"]
+}
+
+IMPORTANT CLASSIFICATION GUIDELINES:
+
+**For Product Category**:
+Categorize products accurately based on their PRIMARY function and use:
+- **Healthcare/Medical**: Pain relievers, vitamins, supplements, medicines, first aid, medical devices, health monitors
+- **Personal Care**: Hygiene products, oral care, menstrual products, contraceptives
+- **Beauty/Cosmetics**: Makeup, skincare, hair styling, fragrances, beauty tools
+- **Fashion/Apparel**: Clothing, footwear, accessories, jewelry, watches
+- **Electronics**: Phones, computers, gadgets, appliances, audio equipment
+- **Food & Beverage**: Groceries, snacks, drinks, supplements
+- **Home & Living**: Furniture, decor, kitchenware, bedding, storage
+- **Sports & Fitness**: Exercise equipment, activewear, sports gear, nutrition
+- **Baby & Kids**: Baby care, toys, children's products
+- **Automotive**: Car accessories, parts, maintenance products
+- **Pet Care**: Pet food, toys, accessories, grooming
+
+CRITICAL: Choose the category that matches the product's ACTUAL FUNCTION:
+- Pain relief gel → "Healthcare/Medical" NOT "Beauty"
+- Vitamin supplements → "Healthcare/Medical" NOT "Food & Beverage"
+- Hair removal cream → "Personal Care" NOT "Beauty"
+- Sunscreen → "Personal Care" OR "Beauty" (both acceptable)
+- Protein powder for bodybuilding → "Sports & Fitness" NOT "Food & Beverage"
+
+**For Post Type (Ad vs Organic)**:
+- Look for "Sponsored", "Paid partnership", or promotional disclosures
+- Assess production quality and commercial intent
+- Consider presence of pricing, CTAs, and product-focused messaging
+
+**For Brand Positioning**:
+Identify the brand's market positioning based on visual cues, messaging, and product presentation:
+- **Luxury/Premium**: High-end brands, sophisticated imagery, premium packaging, exclusive messaging, celebrity endorsements, high price points
+- **Affordable Luxury**: Aspirational brands, quality emphasis, accessible premium feel
+- **Mid-Range**: Balanced quality and price, mainstream appeal, reliable brand reputation
+- **Budget/Mass-Market**: Value-focused, competitive pricing, wide availability, practical messaging
+- **Eco-Friendly/Sustainable**: Environmental messaging, natural imagery, sustainability claims, ethical production
+- **Performance/Technical**: Innovation-focused, technical specifications, professional/athletic endorsements
+- **Artisanal/Craft**: Handmade emphasis, small-batch, traditional methods, unique/limited
+
+Look for indicators:
+- Visual aesthetics (minimalist luxury vs vibrant mass-market)
+- Language used (exclusive, premium, affordable, value)
+- Packaging quality and design
+- Price point if visible
+- Celebrity/influencer partnerships
+- Production quality of content
+
+**For Creator (Person in Video/Image)**:
+- Make your best effort to identify ANY person appearing in the content, regardless of fame level
+- Use all available visual information: facial features, clothing, context, visible text/logos, setting, and any other identifying details
+- Attempt recognition for anyone - from global celebrities to micro-influencers to everyday people with online presence
+- If you can identify them (with any degree of confidence), provide the name and context (e.g., "Emma Chen - Beauty YouTuber", "John Smith - Tech Reviewer")
+- If you cannot identify them despite attempting, provide a detailed physical description (e.g., "Woman in mid-20s with dark hair, wearing athletic clothing")
+- Consider all context clues: watermarks, social media handles visible in frame, brand partnerships, unique styling
+- If no person is visible, state "No person visible" or "Product-only shot"
+
+**For Content Creation Type**:
+- Brand Generated: Official brand content, professional agency-quality production
+- Influencer Generated: Personal brand of creator visible, authentic voice with promotional elements
+- User Generated: Casual customer content, authentic personal experience, non-professional production
+
+**For Media Use Case**:
+- Select ALL applicable categories (multiple selections expected)
+- Consider both primary and secondary purposes of the content
+
+**For What Are They Selling**:
+- Brand: Focus on brand identity/values/awareness
+- Collection: Multiple products from same line/season
+- Product: Specific individual item(s)
+
+RESPOND WITH ONLY THE JSON - no explanations, no markdown code blocks.
+"""
+
+    return base_prompt
+
+
 def is_video_file(file_path: Path) -> bool:
     """Check if file is a video"""
     return file_path.suffix.lower() in ['.mp4', '.mov', '.avi', '.mkv', '.webm']

@@ -14,7 +14,7 @@ from threading import Thread
 from pathlib import Path
 
 # Import product pipeline
-from product_pipeline import run_pipeline
+from pipeline import run_pipeline
 
 # Configure detailed logging
 logging.basicConfig(
