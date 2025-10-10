@@ -24,22 +24,39 @@ from vlm_google import extract_from_file_path
 from claude_product_search import search_from_extraction_data
 
 
-def run_pipeline(cdn_url: str, custom_instruction: str = None, urls_per_query: int = 5) -> dict:
+def run_pipeline(
+    cdn_url: str,
+    session_id: str = None,
+    sender_id: str = None,
+    custom_instruction: str = None,
+    urls_per_query: int = 5,
+    save_results: bool = True
+) -> dict:
     """
     Execute complete pipeline: Download → Extract → Search
 
     Args:
         cdn_url: Facebook CDN URL to download media from
+        session_id: Unique session identifier (for tracking/webhooks)
+        sender_id: Instagram sender ID (optional, for webhook context)
         custom_instruction: Optional instruction for focused extraction
         urls_per_query: Number of product URLs to find per search query
+        save_results: Save results to JSON file (default: True)
 
     Returns:
         Dictionary with complete pipeline results, or None if any stage fails
     """
+    # Generate session ID if not provided
+    if not session_id:
+        session_id = f"session_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+
     print("\n" + "="*80)
     print("🚀 STARTING PRODUCT DISCOVERY PIPELINE")
     print("="*80)
     print(f"📅 Started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"🆔 Session ID: {session_id}")
+    if sender_id:
+        print(f"👤 Sender ID: {sender_id}")
     print()
 
     pipeline_start = datetime.now()
