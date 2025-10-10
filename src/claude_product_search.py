@@ -84,6 +84,7 @@ Response format:
             print(f"🔍 Searching for products across {len(search_queries)} queries...")
             print(f"🤖 Model: {self.model}")
             print(f"🌐 Using Claude Web Search (Messages API)")
+            print(f"💰 Estimated cost: ${len(search_queries) * 0.01:.4f} ({len(search_queries)} searches × $0.01)")
 
             # Make API call with web_search tool
             # Perform one web search per query to get urls_per_query URLs per query
@@ -113,6 +114,17 @@ Response format:
 
             self.request_count += 1
 
+            # CRITICAL: Validate response structure immediately to prevent credit waste
+            if not response or not hasattr(response, 'content'):
+                print("❌ CRITICAL ERROR: Invalid API response structure")
+                print("   Response validation failed - preventing credit waste")
+                return []
+
+            if not response.content:
+                print("❌ CRITICAL ERROR: Empty response.content")
+                print("   No content returned - preventing credit waste")
+                return []
+
             # Count actual web searches performed (for cost tracking)
             # Web searches are billed separately at $10/1000 searches
             # Check for tool_use blocks (which indicate web searches were performed)
@@ -137,39 +149,175 @@ Response format:
                     result_text += block.text
 
             if not result_text:
-                print("❌ Empty response from API")
+                print("❌ CRITICAL ERROR: Empty response text from API")
+                print("   No text content found - API call consumed but no results")
+                print(f"   💸 Wasted cost: ${self.search_count * 0.01:.4f}")
                 return []
 
             print("\n" + "="*70)
-            print("📋 RAW SEARCH RESULT:")
+            print("📋 RAW SEARCH RESULT (First 1000 chars):")
             print("="*70)
-            print(result_text[:500] if len(result_text) > 500 else result_text)
+            # Always print at least first 1000 chars for debugging URL extraction issues
+            print(result_text[:1000] if len(result_text) > 1000 else result_text)
+            if len(result_text) > 1000:
+                print(f"\n... (truncated, total {len(result_text)} characters)")
             print()
 
-            # Parse JSON response
+            # Parse JSON response with COMPREHENSIVE fallback strategies
+            import re
+            urls = []
+            parsing_method = "unknown"
+
             try:
-                # Try to extract JSON from the response
+                # STRATEGY 1: Try direct JSON parsing first
                 result_data = json.loads(result_text)
                 urls = result_data.get("product_urls", [])
+                parsing_method = "direct_json"
+                print(f"✅ Parsing method: Direct JSON")
             except json.JSONDecodeError:
-                # If direct JSON parsing fails, try to find JSON in text
-                import re
-                json_match = re.search(r'\{.*\}', result_text, re.DOTALL)
+                # STRATEGY 2: Remove markdown and try again
+                cleaned_text = result_text
+
+                # Remove ```json and ``` markers
+                cleaned_text = re.sub(r'```json\s*', '', cleaned_text)
+                cleaned_text = re.sub(r'```\s*', '', cleaned_text)
+
+                # STRATEGY 3: Try to find JSON object with product_urls key
+                json_match = re.search(r'\{\s*"product_urls"\s*:\s*\[(.*?)\]\s*\}', cleaned_text, re.DOTALL)
+
                 if json_match:
                     try:
-                        result_data = json.loads(json_match.group())
+                        # Reconstruct the JSON
+                        json_str = '{"product_urls":[' + json_match.group(1) + ']}'
+                        result_data = json.loads(json_str)
                         urls = result_data.get("product_urls", [])
-                    except:
-                        # Fallback: extract URLs manually
-                        url_pattern = r'https?://[^\s<>"{}|\\^`\[\]]+'
+                        parsing_method = "regex_json_reconstruction"
+                        print(f"✅ Parsing method: Regex JSON reconstruction")
+                    except Exception as e:
+                        print(f"⚠️ JSON reconstruction failed: {e}")
+                        # STRATEGY 4: Extract URLs manually using regex
+                        url_pattern = r'https?://[^\s<>"{}|\\^`\[\]]+[^\s<>"{}|\\^`\[\].,;:!?\'\")]'
                         urls = re.findall(url_pattern, result_text)
+                        parsing_method = "regex_url_extraction"
+                        print(f"⚠️ Parsing method: Regex URL extraction (fallback)")
                 else:
-                    # Fallback: extract URLs manually
-                    url_pattern = r'https?://[^\s<>"{}|\\^`\[\]]+'
-                    urls = re.findall(url_pattern, result_text)
+                    # STRATEGY 5: Final fallback - extract ALL URLs from text
+                    print("⚠️ Could not find product_urls JSON structure")
+                    print("⚠️ Attempting direct URL extraction from raw text...")
 
-            print(f"✅ Found {len(urls)} product URLs ({urls_per_query} per query × {len(search_queries)} queries)")
+                    # Try multiple URL patterns for maximum coverage
+                    patterns = [
+                        r'"(https?://[^"]+)"',  # URLs in quotes
+                        r'https?://[^\s<>"{}|\\^`\[\]]+',  # Standard URLs
+                    ]
+
+                    for pattern in patterns:
+                        found_urls = re.findall(pattern, result_text)
+                        if found_urls:
+                            urls.extend(found_urls)
+
+                    parsing_method = "aggressive_url_extraction"
+                    print(f"⚠️ Parsing method: Aggressive URL extraction (last resort)")
+
+            # Clean and deduplicate URLs
+            raw_url_count = len(urls)
+            urls = list(set([url.strip().rstrip(',').rstrip(')').rstrip('"').rstrip("'") for url in urls if url.strip()]))
+
+            print(f"🔍 URL extraction stats:")
+            print(f"   Raw URLs found: {raw_url_count}")
+            print(f"   After deduplication: {len(urls)}")
+            print(f"   Parsing method used: {parsing_method}")
+
+            # CRITICAL: Validate we got results before returning
+            if not urls:
+                print("\n" + "🚨"*35)
+                print("❌ CRITICAL ERROR: NO URLs EXTRACTED FROM API RESPONSE!")
+                print("🚨"*35)
+                print(f"\n💸 API COST INCURRED: ${self.search_count * 0.01:.4f}")
+                print(f"🔍 Parsing method tried: {parsing_method}")
+                print(f"📊 Search queries used: {len(search_queries)}")
+
+                # Save failed response for analysis
+                failed_response_file = PIPELINE_RESULTS_DIR / f"FAILED_search_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+                with open(failed_response_file, 'w', encoding='utf-8') as f:
+                    f.write("="*70 + "\n")
+                    f.write("FAILED API RESPONSE - NO URLs EXTRACTED\n")
+                    f.write("="*70 + "\n\n")
+                    f.write(f"Timestamp: {datetime.now().isoformat()}\n")
+                    f.write(f"Cost incurred: ${self.search_count * 0.01:.4f}\n")
+                    f.write(f"Search queries: {search_queries}\n")
+                    f.write(f"Parsing method: {parsing_method}\n\n")
+                    f.write("="*70 + "\n")
+                    f.write("FULL RESPONSE TEXT:\n")
+                    f.write("="*70 + "\n")
+                    f.write(result_text)
+                    f.write("\n" + "="*70 + "\n")
+
+                print(f"\n💾 Failed response saved to: {failed_response_file.name}")
+                print(f"   Review this file to diagnose the extraction issue")
+                print("\n📋 RESPONSE PREVIEW (First 2000 chars):")
+                print("="*70)
+                print(result_text[:2000])
+                if len(result_text) > 2000:
+                    print(f"\n... (truncated, see {failed_response_file.name} for full text)")
+                print("="*70)
+
+                return []
+
+            # ADDITIONAL VALIDATION: Filter out invalid or suspicious URLs
+            valid_urls = []
+            invalid_urls = []
+
+            for url in urls:
+                # Basic validation
+                if len(url) < 10:  # Too short to be a valid URL
+                    invalid_urls.append((url, "too_short"))
+                    continue
+                if not url.startswith(('http://', 'https://')):  # Must start with protocol
+                    invalid_urls.append((url, "no_protocol"))
+                    continue
+                if ' ' in url:  # URLs shouldn't have spaces
+                    invalid_urls.append((url, "contains_spaces"))
+                    continue
+
+                valid_urls.append(url)
+
+            if invalid_urls:
+                print(f"⚠️ Filtered out {len(invalid_urls)} invalid URLs:")
+                for invalid_url, reason in invalid_urls[:5]:
+                    print(f"   ❌ {invalid_url[:50]} (reason: {reason})")
+
+            urls = valid_urls
+
+            # FINAL CHECK: Ensure we still have URLs after validation
+            if not urls:
+                print("\n" + "🚨"*35)
+                print("❌ CRITICAL ERROR: ALL EXTRACTED URLs WERE INVALID!")
+                print("🚨"*35)
+                print(f"\n💸 API COST INCURRED: ${self.search_count * 0.01:.4f}")
+                print(f"📊 Total extracted: {raw_url_count}, Valid: 0")
+
+                # Save failed response
+                failed_response_file = PIPELINE_RESULTS_DIR / f"FAILED_search_invalid_urls_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+                with open(failed_response_file, 'w', encoding='utf-8') as f:
+                    f.write("FAILED: All extracted URLs were invalid\n\n")
+                    f.write(f"Invalid URLs found:\n")
+                    for invalid_url, reason in invalid_urls:
+                        f.write(f"  - {invalid_url} (reason: {reason})\n")
+                    f.write(f"\n\nFull response:\n{result_text}")
+
+                print(f"\n💾 Failure details saved to: {failed_response_file.name}")
+                return []
+
+            print(f"\n✅ Successfully extracted {len(urls)} valid product URLs")
             print(f"💰 Web searches performed: {self.search_count} (${self.search_count * 0.01:.4f})")
+            print(f"📊 Extraction efficiency: {len(urls)}/{raw_url_count} URLs valid ({len(urls)/raw_url_count*100:.1f}%)")
+            print(f"\n📋 Sample URLs:")
+            for i, url in enumerate(urls[:5], 1):
+                print(f"   {i}. {url[:80]}{'...' if len(url) > 80 else ''}")
+            if len(urls) > 5:
+                print(f"   ... and {len(urls) - 5} more")
+
             return urls
 
         except Exception as e:
